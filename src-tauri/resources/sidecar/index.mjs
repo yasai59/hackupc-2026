@@ -11,6 +11,8 @@ const peers = new Map()
 let currentTopic = null
 let currentRoomId = null
 let documentContent = ''
+let isRoomCreator = false
+let awaitingInitialSync = false
 let username = 'Writer'
 let myPeerId = crypto.randomBytes(8).toString('hex')
 
@@ -92,6 +94,8 @@ function createRoom(content) {
   const id = Math.random().toString(36).slice(2, 8)
   currentRoomId = 'inkwell-' + id
   documentContent = content || ''
+  isRoomCreator = true
+  awaitingInitialSync = false
   const topicBuffer = crypto.createHash('sha256').update(currentRoomId).digest()
 
   currentTopic = topicBuffer
@@ -111,6 +115,8 @@ function joinRoom(roomId, content) {
 
   currentRoomId = roomId
   documentContent = content || ''
+  isRoomCreator = false
+  awaitingInitialSync = true
   const topicBuffer = crypto.createHash('sha256').update(currentRoomId).digest()
 
   currentTopic = topicBuffer
@@ -119,6 +125,7 @@ function joinRoom(roomId, content) {
   sendToFrontend({
     type: 'room-joined',
     roomId: currentRoomId,
+    content: documentContent,
   })
 
   console.log(`Joined room: ${currentRoomId}`)
@@ -135,6 +142,8 @@ function leaveRoom() {
   }
   peers.clear()
   currentRoomId = null
+  isRoomCreator = false
+  awaitingInitialSync = false
 
   sendToFrontend({
     type: 'left',
@@ -255,10 +264,13 @@ function handlePeerMessage(msg, fromPeerId) {
       break
 
     case 'sync-response':
-      documentContent = msg.text
+      if (awaitingInitialSync || documentContent.length === 0) {
+        documentContent = msg.text
+        awaitingInitialSync = false
+      }
       sendToFrontend({
         type: 'remote-change',
-        text: msg.text,
+        text: documentContent,
         peerId: msg.peerId || fromPeerId,
       })
       break

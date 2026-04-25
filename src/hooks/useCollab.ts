@@ -148,10 +148,18 @@ export function useCollab(
 
       case 'room-joined': {
         const roomId = msg.roomId as string;
+        const docContent = (msg.content as string) || '';
         roomIdRef.current = roomId;
-        if (!loadDoc(roomId)) {
-          saveDoc(roomId, contentRef.current);
+        const savedContent = loadDoc(roomId);
+        const content = savedContent || docContent;
+        if (content) {
+          contentRef.current = content;
+          prevContentRef.current = content;
+          isRemoteRef.current = true;
+          onRemoteChangeRef.current(content);
+          requestAnimationFrame(() => { isRemoteRef.current = false; });
         }
+        if (!savedContent) saveDoc(roomId, docContent);
         setState(prev => ({
           ...prev,
           isConnected: true,
