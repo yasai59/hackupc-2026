@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 
 const CURSOR_COLORS = ['#c45d3e', '#2d8a4e', '#4a6fa5', '#9b59b6', '#e67e22', '#1abc9c', '#e74c3c', '#3498db'];
-const SIDECAR_URL = 'ws://localhost:9876';
+const DEV_PORT = 9876;
 
 export interface RemoteCursor {
   peerId: string;
@@ -64,6 +64,19 @@ function adjustPos(pos: number, start: number, deletedLen: number, insertedLen: 
   return pos + (insertedLen - deletedLen);
 }
 
+async function getSidecarPort(): Promise<number> {
+  if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__?.invoke) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        const port = await (window as any).__TAURI_INTERNALS__.invoke('get_sidecar_port');
+        if (typeof port === 'number' && port > 0) return port;
+      } catch { /* not in Tauri or command failed */ }
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  return DEV_PORT;
+}
+
 export function useCollab(
   content: string,
   onRemoteChange: (text: string) => void,
@@ -73,6 +86,7 @@ export function useCollab(
     isConnected: false, roomId: null, peerCount: 0, error: null, savedRooms: [],
   });
   const [remoteCursors, setRemoteCursors] = useState<RemoteCursor[]>([]);
+  const [sidecarPort, setSidecarPort] = useState<number | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const isRemoteRef = useRef(false);
@@ -82,6 +96,7 @@ export function useCollab(
   const peerColorRef = useRef<string>(CURSOR_COLORS[Math.floor(Math.random() * CURSOR_COLORS.length)]);
   const onRemoteChangeRef = useRef(onRemoteChange);
   const usernameRef = useRef(username);
+  const portRef = useRef<number>(DEV_PORT);
 
   contentRef.current = content;
   onRemoteChangeRef.current = onRemoteChange;
@@ -89,6 +104,13 @@ export function useCollab(
 
   useEffect(() => {
     setState(prev => ({ ...prev, savedRooms: getSavedRooms() }));
+  }, []);
+
+  useEffect(() => {
+    getSidecarPort().then((port) => {
+      portRef.current = port;
+      setSidecarPort(port);
+    });
   }, []);
 
   useEffect(() => {
@@ -215,10 +237,13 @@ export function useCollab(
   }
 
   useEffect(() => {
-    const ws = new WebSocket(SIDECAR_URL);
+    if (sidecarPort === null) return;
+
+    const url = `ws://localhost:${sidecarPort}`;
+    const ws = new WebSocket(url);
 
     ws.onopen = () => {
-      console.log('Connected to Inkwell P2P sidecar');
+      console.log(`Connected to sidecar on port ${sidecarPort}`);
       ws.send(JSON.stringify({ type: 'username', username: usernameRef.current }));
     };
 
@@ -230,12 +255,12 @@ export function useCollab(
     };
 
     ws.onclose = () => {
-      console.log('Disconnected from sidecar, reconnecting in 2s...');
+      console.log(`Disconnected from sidecar on port ${sidecarPort}, reconnecting in 2s...`);
       wsRef.current = null;
       setTimeout(() => {
         if (!wsRef.current) {
-          const newWs = new WebSocket(SIDECAR_URL);
-          reconnect(newWs);
+          const newWs = new WebSocket(url);
+          reconnect(newWs, url);
         }
       }, 2000);
     };
@@ -251,11 +276,11 @@ export function useCollab(
       ws.close();
       wsRef.current = null;
     };
-  }, []);
+  }, [sidecarPort]);
 
-  function reconnect(ws: WebSocket) {
+  function reconnect(ws: WebSocket, url: string) {
     ws.onopen = () => {
-      console.log('Reconnected to Inkwell P2P sidecar');
+      console.log(`Reconnected to sidecar on ${url}`);
       ws.send(JSON.stringify({ type: 'username', username: usernameRef.current }));
     };
 
@@ -267,12 +292,12 @@ export function useCollab(
     };
 
     ws.onclose = () => {
-      console.log('Disconnected from sidecar, reconnecting in 2s...');
+      console.log(`Disconnected from sidecar on ${url}, reconnecting in 2s...`);
       wsRef.current = null;
       setTimeout(() => {
         if (!wsRef.current) {
-          const newWs = new WebSocket(SIDECAR_URL);
-          reconnect(newWs);
+          const newWs = new WebSocket(url);
+          reconnect(newWs, url);
         }
       }, 2000);
     };

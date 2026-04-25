@@ -1,13 +1,56 @@
-use std::process::{Child, Command};
+use std::io::{BufRead, BufReader};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 use tauri::Manager;
 
 static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
+static SIDECAR_PORT: Mutex<Option<u16>> = Mutex::new(None);
+
+fn find_node() -> Result<std::path::PathBuf, String> {
+    if let Ok(p) = which::which("node") {
+        return Ok(p);
+    }
+
+    let extra_paths = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/opt/local/bin",
+        "/run/current-system/sw/bin",
+    ];
+
+    if let Ok(path_env) = std::env::var("PATH") {
+        let existing: Vec<&str> = path_env.split(':').collect();
+        let mut new_path = path_env.clone();
+        for p in &extra_paths {
+            if !existing.iter().any(|e| e == p) {
+                new_path.push(':');
+                new_path.push_str(p);
+            }
+        }
+        std::env::set_var("PATH", &new_path);
+        if let Ok(p) = which::which("node") {
+            return Ok(p);
+        }
+    }
+
+    for dir in &extra_paths {
+        let candidate = std::path::Path::new(dir).join("node");
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("node not found in PATH or common locations".to_string())
+}
 
 fn start_sidecar(app: &tauri::AppHandle) -> Result<(), String> {
-    let node_path = which::which("node").map_err(|e| format!("node not found: {}", e))?;
+    let node_path = find_node()?;
 
-    let resource_dir = app.path().resource_dir()
+    let resource_dir = app
+        .path()
+        .resource_dir()
         .map_err(|e| format!("Failed to get resource dir: {}", e))?;
 
     let sidecar_path = resource_dir
@@ -19,14 +62,62 @@ fn start_sidecar(app: &tauri::AppHandle) -> Result<(), String> {
         return Err(format!("Sidecar not found at: {:?}", sidecar_path));
     }
 
-    let child = Command::new(node_path)
+    eprintln!("[inkwell] Starting sidecar from: {:?}", sidecar_path);
+    eprintln!("[inkwell] Using node at: {:?}", node_path);
+
+    let mut child = Command::new(&node_path)
         .arg(&sidecar_path)
         .current_dir(sidecar_path.parent().unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to start sidecar: {}", e))?;
+        .map_err(|e| format!("Failed to spawn sidecar: {}", e))?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    if let Some(stdout) = stdout {
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().flatten() {
+                eprintln!("[sidecar:out] {}", line);
+            }
+        });
+    }
+
+    if let Some(stderr) = stderr {
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                if line.starts_with("SIDECAR_PORT:") {
+                    if let Some(port_str) = line.strip_prefix("SIDECAR_PORT:") {
+                        if let Ok(port) = port_str.parse::<u16>() {
+                            *SIDECAR_PORT.lock().unwrap() = Some(port);
+                            eprintln!("[inkwell] Sidecar started on port {}", port);
+                        }
+                    }
+                } else {
+                    eprintln!("[sidecar] {}", line);
+                }
+            }
+        });
+    }
 
     *SIDECAR.lock().unwrap() = Some(child);
-    log::info!("Inkwell P2P sidecar started from: {:?}", sidecar_path);
+
+    let timeout = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    loop {
+        if SIDECAR_PORT.lock().unwrap().is_some() {
+            break;
+        }
+        if start.elapsed() > timeout {
+            eprintln!("[inkwell] Warning: timed out waiting for sidecar port, frontend will retry");
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
     Ok(())
 }
 
@@ -35,20 +126,31 @@ fn stop_sidecar() {
         if let Some(ref mut child) = *guard {
             let _ = child.kill();
             let _ = child.wait();
-            log::info!("Inkwell P2P sidecar stopped");
+            eprintln!("[inkwell] Sidecar stopped");
         }
         *guard = None;
     }
+    *SIDECAR_PORT.lock().unwrap() = None;
+}
+
+#[tauri::command]
+fn get_sidecar_port() -> Option<u16> {
+    *SIDECAR_PORT.lock().unwrap()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    eprintln!("[inkwell] App starting, PID: {}", std::process::id());
+
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![get_sidecar_port])
         .setup(|app| {
+            eprintln!("[inkwell] Setup running, PID: {}", std::process::id());
+
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
+                        .level(log::LevelFilter::Debug)
                         .build(),
                 )?;
             }

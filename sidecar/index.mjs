@@ -2,7 +2,9 @@ import Hyperswarm from 'hyperswarm'
 import crypto from 'crypto'
 import { WebSocketServer } from 'ws'
 
-const SWARM_PORT = 9876
+const requestedPort = process.argv.includes('--port')
+  ? parseInt(process.argv[process.argv.indexOf('--port') + 1], 10)
+  : 0
 
 const swarm = new Hyperswarm()
 const peers = new Map()
@@ -12,7 +14,16 @@ let documentContent = ''
 let username = 'Writer'
 let myPeerId = crypto.randomBytes(8).toString('hex')
 
-const wss = new WebSocketServer({ port: SWARM_PORT })
+const wss = new WebSocketServer({ port: requestedPort, host: '127.0.0.1' })
+
+// Wait for the server to be listening before reading the port
+await new Promise((resolve) => {
+  wss.on('listening', resolve)
+})
+
+const SWARM_PORT = wss.address().port
+
+process.stderr.write(`SIDECAR_PORT:${SWARM_PORT}\n`)
 
 let frontendClient = null
 
@@ -29,7 +40,7 @@ wss.on('connection', (ws) => {
   })
 
   ws.on('close', () => {
-    frontendClient = null
+    if (frontendClient === ws) frontendClient = null
   })
 
   sendToFrontend({ type: 'connected', peerId: myPeerId })
