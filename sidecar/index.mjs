@@ -11,9 +11,9 @@ const peers = new Map()
 let currentTopic = null
 let currentRoomId = null
 let documentContent = ''
-let syncedWithPeer = false
+let documentVersion = 0
 let username = 'Writer'
-let myPeerId = crypto.randomBytes(8).toString('hex')
+const myPeerId = crypto.randomBytes(8).toString('hex')
 
 const wss = new WebSocketServer({ port: requestedPort, host: '127.0.0.1' })
 
@@ -64,13 +64,22 @@ function sendToFrontend(msg) {
   }
 }
 
-function broadcastToPeers(msg) {
-  const data = JSON.stringify(msg) + '\n'
-  for (const stream of peers.values()) {
+function sendToPeer(peerId, msg) {
+  const stream = peers.get(peerId)
+  if (stream && !stream.destroyed) {
     try {
-      stream.write(data)
-    } catch (err) {
-      console.error('Error sending to peer:', err)
+      stream.write(JSON.stringify(msg) + '\n')
+    } catch {}
+  }
+}
+
+function relayToOtherPeers(fromPeerId, msg) {
+  const data = JSON.stringify(msg) + '\n'
+  for (const [pid, stream] of peers) {
+    if (pid !== fromPeerId) {
+      try {
+        stream.write(data)
+      } catch {}
     }
   }
 }
@@ -101,16 +110,21 @@ function handleFrontendMessage(msg) {
 }
 
 function createRoom(content) {
-  if (currentRoomId) leaveRoom()
+  if (currentTopic) {
+    swarm.leave(currentTopic)
+    for (const stream of peers.values()) {
+      try { stream.end() } catch {}
+    }
+    peers.clear()
+  }
 
   const id = Math.random().toString(36).slice(2, 8)
   currentRoomId = 'inkwell-' + id
   documentContent = content || ''
-  syncedWithPeer = true
-  const topicBuffer = crypto.createHash('sha256').update(currentRoomId).digest()
+  documentVersion = 1
+  currentTopic = crypto.createHash('sha256').update(currentRoomId).digest()
 
-  currentTopic = topicBuffer
-  swarm.join(topicBuffer, { server: true, client: true })
+  swarm.join(currentTopic, { server: true, client: true })
 
   sendToFrontend({
     type: 'room-created',
@@ -122,15 +136,20 @@ function createRoom(content) {
 }
 
 function joinRoom(roomId, content) {
-  if (currentRoomId) leaveRoom()
+  if (currentTopic) {
+    swarm.leave(currentTopic)
+    for (const stream of peers.values()) {
+      try { stream.end() } catch {}
+    }
+    peers.clear()
+  }
 
   currentRoomId = roomId
   documentContent = content || ''
-  syncedWithPeer = false
-  const topicBuffer = crypto.createHash('sha256').update(currentRoomId).digest()
+  documentVersion = 0
+  currentTopic = crypto.createHash('sha256').update(currentRoomId).digest()
 
-  currentTopic = topicBuffer
-  swarm.join(topicBuffer, { server: true, client: true })
+  swarm.join(currentTopic, { server: true, client: true })
 
   sendToFrontend({
     type: 'room-joined',
@@ -153,21 +172,21 @@ function leaveRoom() {
   peers.clear()
   currentRoomId = null
   documentContent = ''
-  syncedWithPeer = false
+  documentVersion = 0
 
-  sendToFrontend({
-    type: 'left',
-    peerCount: 0,
-  })
+  sendToFrontend({ type: 'left', peerCount: 0 })
 
   console.log('Left room')
 }
 
 function handleChange(msg) {
   documentContent = msg.text
+  documentVersion++
+
   broadcastToPeers({
     type: 'change',
     text: msg.text,
+    version: documentVersion,
     editStart: msg.editStart,
     editDeletedLen: msg.editDeletedLen,
     editInsertedLen: msg.editInsertedLen,
@@ -185,8 +204,23 @@ function handleCursor(msg) {
   })
 }
 
+function broadcastToPeers(msg) {
+  const data = JSON.stringify(msg) + '\n'
+  for (const stream of peers.values()) {
+    try {
+      stream.write(data)
+    } catch (err) {
+      console.error('Error sending to peer:', err)
+    }
+  }
+}
+
 swarm.on('connection', (stream) => {
   const peerId = stream.remotePublicKey.toString('hex').slice(0, 16)
+
+  if (peers.has(peerId)) {
+    try { peers.get(peerId).end() } catch {}
+  }
   peers.set(peerId, stream)
 
   let buffer = ''
@@ -200,7 +234,7 @@ swarm.on('connection', (stream) => {
       if (!line.trim()) continue
       try {
         const msg = JSON.parse(line)
-        handlePeerMessage(msg, peerId, stream)
+        handlePeerMessage(msg, peerId)
       } catch (err) {
         console.error('Parse error:', err)
       }
@@ -234,35 +268,43 @@ swarm.on('connection', (stream) => {
 
   console.log(`Peer connected: ${peerId}`)
 
-  stream.write(JSON.stringify({
+  sendToPeer(peerId, {
     type: 'sync',
     text: documentContent,
+    version: documentVersion,
     peerId: myPeerId,
     name: username,
-  }) + '\n')
+  })
 })
 
-function handlePeerMessage(msg, fromPeerId, fromStream) {
+function handlePeerMessage(msg, fromPeerId) {
   switch (msg.type) {
-    case 'change':
-      documentContent = msg.text
-      sendToFrontend({
-        type: 'remote-change',
-        text: msg.text,
-        editStart: msg.editStart,
-        editDeletedLen: msg.editDeletedLen,
-        editInsertedLen: msg.editInsertedLen,
-        peerId: msg.peerId,
-      })
-      broadcastToPeers({
-        type: 'change',
-        text: msg.text,
-        editStart: msg.editStart,
-        editDeletedLen: msg.editDeletedLen,
-        editInsertedLen: msg.editInsertedLen,
-        peerId: msg.peerId,
-      })
+    case 'change': {
+      if (msg.version > documentVersion) {
+        documentContent = msg.text
+        documentVersion = msg.version
+
+        sendToFrontend({
+          type: 'remote-change',
+          text: msg.text,
+          editStart: msg.editStart,
+          editDeletedLen: msg.editDeletedLen,
+          editInsertedLen: msg.editInsertedLen,
+          peerId: msg.peerId,
+        })
+
+        relayToOtherPeers(fromPeerId, {
+          type: 'change',
+          text: msg.text,
+          version: msg.version,
+          editStart: msg.editStart,
+          editDeletedLen: msg.editDeletedLen,
+          editInsertedLen: msg.editInsertedLen,
+          peerId: msg.peerId,
+        })
+      }
       break
+    }
 
     case 'cursor':
       sendToFrontend({
@@ -272,37 +314,44 @@ function handlePeerMessage(msg, fromPeerId, fromStream) {
         color: msg.color,
         name: msg.name,
       })
+      relayToOtherPeers(fromPeerId, msg)
       break
 
-    case 'sync':
-      if (!syncedWithPeer || msg.text.length > documentContent.length) {
+    case 'sync': {
+      if (msg.version > documentVersion && msg.text.length > 0) {
         documentContent = msg.text
-        syncedWithPeer = true
+        documentVersion = msg.version
+
         sendToFrontend({
           type: 'remote-change',
           text: msg.text,
-          peerId: msg.peerId || fromPeerId,
+          peerId: msg.peerId,
         })
       }
-      fromStream.write(JSON.stringify({
+
+      sendToPeer(fromPeerId, {
         type: 'sync-ack',
         text: documentContent,
+        version: documentVersion,
         peerId: myPeerId,
         name: username,
-      }) + '\n')
+      })
       break
+    }
 
-    case 'sync-ack':
-      if (!syncedWithPeer || msg.text.length > documentContent.length) {
+    case 'sync-ack': {
+      if (msg.version > documentVersion && msg.text.length > 0) {
         documentContent = msg.text
-        syncedWithPeer = true
+        documentVersion = msg.version
+
         sendToFrontend({
           type: 'remote-change',
           text: msg.text,
-          peerId: msg.peerId || fromPeerId,
+          peerId: msg.peerId,
         })
       }
       break
+    }
   }
 }
 

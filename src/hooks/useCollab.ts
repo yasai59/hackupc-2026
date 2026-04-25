@@ -36,7 +36,6 @@ function getSavedRooms(): string[] {
   try { return JSON.parse(localStorage.getItem(ROOMS_KEY) || '[]'); }
   catch { return []; }
 }
-
 function saveRooms(rooms: string[]) { localStorage.setItem(ROOMS_KEY, JSON.stringify(rooms)); }
 function saveDoc(roomId: string, text: string) {
   localStorage.setItem(DOC_PREFIX + roomId, text);
@@ -96,7 +95,6 @@ export function useCollab(
   const peerColorRef = useRef<string>(CURSOR_COLORS[Math.floor(Math.random() * CURSOR_COLORS.length)]);
   const onRemoteChangeRef = useRef(onRemoteChange);
   const usernameRef = useRef(username);
-  const portRef = useRef<number>(DEV_PORT);
 
   contentRef.current = content;
   onRemoteChangeRef.current = onRemoteChange;
@@ -108,7 +106,6 @@ export function useCollab(
 
   useEffect(() => {
     getSidecarPort().then((port) => {
-      portRef.current = port;
       setSidecarPort(port);
     });
   }, []);
@@ -119,22 +116,7 @@ export function useCollab(
     }
   }, [username]);
 
-  function applyRemoteChange(text: string, msg: Record<string, unknown>) {
-    isRemoteRef.current = true;
-    if (typeof msg.editStart === 'number' && typeof msg.editDeletedLen === 'number' && typeof msg.editInsertedLen === 'number') {
-      setRemoteCursors(prev => prev.map(c => ({
-        ...c,
-        position: adjustPos(c.position, msg.editStart as number, msg.editDeletedLen as number, msg.editInsertedLen as number),
-      })));
-    }
-    onRemoteChangeRef.current(text);
-    prevContentRef.current = text;
-    contentRef.current = text;
-    if (roomIdRef.current) saveDoc(roomIdRef.current, text);
-    requestAnimationFrame(() => { isRemoteRef.current = false; });
-  }
-
-  function processMessage(msg: Record<string, unknown>) {
+  const processMessage = useCallback((msg: Record<string, unknown>) => {
     switch (msg.type) {
       case 'connected':
         break;
@@ -163,10 +145,10 @@ export function useCollab(
 
       case 'room-joined': {
         const roomId = msg.roomId as string;
-        const docContent = (msg.content as string) || '';
-        roomIdRef.current = roomId;
+        const sidecarContent = (msg.content as string) || '';
         const savedContent = loadDoc(roomId);
-        const content = savedContent || docContent;
+        const content = savedContent || sidecarContent;
+        roomIdRef.current = roomId;
         contentRef.current = content;
         prevContentRef.current = content;
         if (content) {
@@ -219,7 +201,18 @@ export function useCollab(
 
       case 'remote-change': {
         const text = msg.text as string;
-        applyRemoteChange(text, msg);
+        isRemoteRef.current = true;
+        if (typeof msg.editStart === 'number' && typeof msg.editDeletedLen === 'number' && typeof msg.editInsertedLen === 'number') {
+          setRemoteCursors(prev => prev.map(c => ({
+            ...c,
+            position: adjustPos(c.position, msg.editStart as number, msg.editDeletedLen as number, msg.editInsertedLen as number),
+          })));
+        }
+        onRemoteChangeRef.current(text);
+        prevContentRef.current = text;
+        contentRef.current = text;
+        if (roomIdRef.current) saveDoc(roomIdRef.current, text);
+        requestAnimationFrame(() => { isRemoteRef.current = false; });
         break;
       }
 
@@ -244,82 +237,59 @@ export function useCollab(
         }));
         setRemoteCursors([]);
         roomIdRef.current = null;
+        contentRef.current = '';
+        prevContentRef.current = '';
         break;
     }
-  }
+  }, []);
 
   useEffect(() => {
     if (sidecarPort === null) return;
 
     const url = `ws://localhost:${sidecarPort}`;
-    const ws = new WebSocket(url);
 
-    ws.onopen = () => {
-      console.log(`Connected to sidecar on port ${sidecarPort}`);
-      ws.send(JSON.stringify({ type: 'username', username: usernameRef.current }));
-    };
+    function connect() {
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
 
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        processMessage(msg);
-      } catch { /* ignore */ }
-    };
+      ws.onopen = () => {
+        console.log(`Connected to sidecar on port ${sidecarPort}`);
+        ws.send(JSON.stringify({ type: 'username', username: usernameRef.current }));
+      };
 
-    ws.onclose = () => {
-      console.log(`Disconnected from sidecar on port ${sidecarPort}, reconnecting in 2s...`);
-      wsRef.current = null;
-      setTimeout(() => {
-        if (!wsRef.current) {
-          const newWs = new WebSocket(url);
-          reconnect(newWs, url);
-        }
-      }, 2000);
-    };
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          processMessage(msg);
+        } catch { /* ignore */ }
+      };
 
-    ws.onerror = () => {
-      ws.close();
-    };
+      ws.onclose = () => {
+        wsRef.current = null;
+        console.log(`Disconnected from sidecar, reconnecting in 2s...`);
+        setTimeout(() => {
+          if (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED) {
+            connect();
+          }
+        }, 2000);
+      };
 
-    wsRef.current = ws;
+      ws.onerror = () => {
+        ws.close();
+      };
+    }
+
+    connect();
 
     return () => {
-      ws.onclose = null;
-      ws.close();
-      wsRef.current = null;
+      const ws = wsRef.current;
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+        wsRef.current = null;
+      }
     };
-  }, [sidecarPort]);
-
-  function reconnect(ws: WebSocket, url: string) {
-    ws.onopen = () => {
-      console.log(`Reconnected to sidecar on ${url}`);
-      ws.send(JSON.stringify({ type: 'username', username: usernameRef.current }));
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        processMessage(msg);
-      } catch { /* ignore */ }
-    };
-
-    ws.onclose = () => {
-      console.log(`Disconnected from sidecar on ${url}, reconnecting in 2s...`);
-      wsRef.current = null;
-      setTimeout(() => {
-        if (!wsRef.current) {
-          const newWs = new WebSocket(url);
-          reconnect(newWs, url);
-        }
-      }, 2000);
-    };
-
-    ws.onerror = () => {
-      ws.close();
-    };
-
-    wsRef.current = ws;
-  }
+  }, [sidecarPort, processMessage]);
 
   const sendToSidecar = useCallback((msg: object) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -362,6 +332,7 @@ export function useCollab(
       position: adjustPos(c.position, start, deletedLen, insertedLen),
     })));
     prevContentRef.current = text;
+    contentRef.current = text;
     if (roomIdRef.current) saveDoc(roomIdRef.current, text);
     sendToSidecar({
       type: 'change',
