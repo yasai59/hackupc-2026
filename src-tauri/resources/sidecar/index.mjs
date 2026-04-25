@@ -8,13 +8,12 @@ const requestedPort = process.argv.includes('--port')
 
 const swarm = new Hyperswarm()
 const peers = new Map()
-const peerInfo = new Map()
+const peerNames = new Map()
 let currentTopic = null
 let currentRoomId = null
 let documentContent = ''
 let documentVersion = 0
 let username = 'Writer'
-const myPeerId = crypto.randomBytes(8).toString('hex')
 
 const wss = new WebSocketServer({ port: requestedPort, host: '127.0.0.1' })
 
@@ -47,7 +46,7 @@ wss.on('connection', (ws) => {
     if (frontendClient === ws) frontendClient = null
   })
 
-  sendToFrontend({ type: 'connected', peerId: myPeerId })
+  sendToFrontend({ type: 'connected' })
 
   if (currentRoomId) {
     sendToFrontend({
@@ -115,7 +114,7 @@ function cleanupPeers() {
     try { stream.end() } catch {}
   }
   peers.clear()
-  peerInfo.clear()
+  peerNames.clear()
 }
 
 function createRoom(content) {
@@ -190,7 +189,7 @@ function handleChange(msg) {
     editStart: msg.editStart,
     editDeletedLen: msg.editDeletedLen,
     editInsertedLen: msg.editInsertedLen,
-    peerId: myPeerId,
+    name: username,
   })
 }
 
@@ -198,7 +197,6 @@ function handleCursor(msg) {
   broadcastToPeers({
     type: 'cursor',
     position: msg.position,
-    peerId: myPeerId,
     color: msg.color,
     name: username,
   })
@@ -213,6 +211,16 @@ function broadcastToPeers(msg) {
       console.error('Error sending to peer:', err)
     }
   }
+}
+
+function notifyPeerDisconnected(streamPeerId) {
+  const name = peerNames.get(streamPeerId)
+  sendToFrontend({
+    type: 'peer-disconnected',
+    peerId: streamPeerId,
+    peerCount: peers.size,
+    name: name || '',
+  })
 }
 
 swarm.on('connection', (stream) => {
@@ -234,7 +242,7 @@ swarm.on('connection', (stream) => {
       if (!line.trim()) continue
       try {
         const msg = JSON.parse(line)
-        handlePeerMessage(msg, streamPeerId)
+        handlePeerMessage(msg, streamPeerId, stream)
       } catch (err) {
         console.error('Parse error:', err)
       }
@@ -244,14 +252,8 @@ swarm.on('connection', (stream) => {
   stream.on('close', () => {
     if (peers.get(streamPeerId) === stream) {
       peers.delete(streamPeerId)
-      const info = peerInfo.get(streamPeerId)
-      peerInfo.delete(streamPeerId)
-
-      sendToFrontend({
-        type: 'peer-disconnected',
-        peerId: info ? info.peerId : streamPeerId,
-        peerCount: peers.size,
-      })
+      peerNames.delete(streamPeerId)
+      notifyPeerDisconnected(streamPeerId)
       console.log(`Peer disconnected: ${streamPeerId}`)
     }
   })
@@ -260,14 +262,8 @@ swarm.on('connection', (stream) => {
     console.error(`Stream error from ${streamPeerId}:`, err)
     if (peers.get(streamPeerId) === stream) {
       peers.delete(streamPeerId)
-      const info = peerInfo.get(streamPeerId)
-      peerInfo.delete(streamPeerId)
-
-      sendToFrontend({
-        type: 'peer-disconnected',
-        peerId: info ? info.peerId : streamPeerId,
-        peerCount: peers.size,
-      })
+      peerNames.delete(streamPeerId)
+      notifyPeerDisconnected(streamPeerId)
     }
   })
 
@@ -275,6 +271,7 @@ swarm.on('connection', (stream) => {
     type: 'peer-connected',
     peerId: streamPeerId,
     peerCount: peers.size,
+    name: peerNames.get(streamPeerId) || '',
   })
 
   console.log(`Peer connected: ${streamPeerId}`)
@@ -283,12 +280,17 @@ swarm.on('connection', (stream) => {
     type: 'sync',
     text: documentContent,
     version: documentVersion,
-    peerId: myPeerId,
     name: username,
   })
 })
 
-function handlePeerMessage(msg, fromStreamPeerId) {
+function handlePeerMessage(msg, fromStreamPeerId, fromStream) {
+  const senderName = msg.name || peerNames.get(fromStreamPeerId) || 'Writer'
+  if (msg.name) peerNames.set(fromStreamPeerId, msg.name)
+
+  const displayPeerId = msg.sourcePeerId || fromStreamPeerId
+  if (msg.sourcePeerId) peerNames.set(msg.sourcePeerId, senderName)
+
   switch (msg.type) {
     case 'change': {
       if (msg.version > documentVersion) {
@@ -298,10 +300,11 @@ function handlePeerMessage(msg, fromStreamPeerId) {
         sendToFrontend({
           type: 'remote-change',
           text: msg.text,
+          peerId: displayPeerId,
           editStart: msg.editStart,
           editDeletedLen: msg.editDeletedLen,
           editInsertedLen: msg.editInsertedLen,
-          peerId: msg.peerId,
+          peerName: senderName,
         })
 
         relayToOtherPeers(fromStreamPeerId, {
@@ -311,27 +314,31 @@ function handlePeerMessage(msg, fromStreamPeerId) {
           editStart: msg.editStart,
           editDeletedLen: msg.editDeletedLen,
           editInsertedLen: msg.editInsertedLen,
-          peerId: msg.peerId,
+          name: senderName,
+          sourcePeerId: displayPeerId,
         })
       }
       break
     }
 
     case 'cursor':
-      peerInfo.set(fromStreamPeerId, { peerId: msg.peerId, name: msg.name })
       sendToFrontend({
         type: 'remote-cursor',
         position: msg.position,
-        peerId: msg.peerId,
+        peerId: displayPeerId,
         color: msg.color,
-        name: msg.name,
+        name: senderName,
       })
-      relayToOtherPeers(fromStreamPeerId, msg)
+      relayToOtherPeers(fromStreamPeerId, {
+        type: 'cursor',
+        position: msg.position,
+        color: msg.color,
+        name: senderName,
+        sourcePeerId: displayPeerId,
+      })
       break
 
     case 'sync': {
-      peerInfo.set(fromStreamPeerId, { peerId: msg.peerId, name: msg.name || 'Writer' })
-
       if (msg.version > documentVersion && msg.text.length > 0) {
         documentContent = msg.text
         documentVersion = msg.version
@@ -339,7 +346,8 @@ function handlePeerMessage(msg, fromStreamPeerId) {
         sendToFrontend({
           type: 'remote-change',
           text: msg.text,
-          peerId: msg.peerId,
+          peerId: displayPeerId,
+          peerName: senderName,
         })
       }
 
@@ -347,15 +355,12 @@ function handlePeerMessage(msg, fromStreamPeerId) {
         type: 'sync-ack',
         text: documentContent,
         version: documentVersion,
-        peerId: myPeerId,
         name: username,
       })
       break
     }
 
     case 'sync-ack': {
-      peerInfo.set(fromStreamPeerId, { peerId: msg.peerId, name: msg.name || 'Writer' })
-
       if (msg.version > documentVersion && msg.text.length > 0) {
         documentContent = msg.text
         documentVersion = msg.version
@@ -363,7 +368,8 @@ function handlePeerMessage(msg, fromStreamPeerId) {
         sendToFrontend({
           type: 'remote-change',
           text: msg.text,
-          peerId: msg.peerId,
+          peerId: displayPeerId,
+          peerName: senderName,
         })
       }
       break
@@ -376,4 +382,3 @@ swarm.on('error', (err) => {
 })
 
 console.log(`Inkwell P2P sidecar running on ws://localhost:${SWARM_PORT}`)
-console.log(`My Peer ID: ${myPeerId}`)
