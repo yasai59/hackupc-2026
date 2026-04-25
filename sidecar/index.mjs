@@ -8,6 +8,7 @@ const requestedPort = process.argv.includes('--port')
 
 const swarm = new Hyperswarm()
 const peers = new Map()
+const peerInfo = new Map()
 let currentTopic = null
 let currentRoomId = null
 let documentContent = ''
@@ -64,8 +65,8 @@ function sendToFrontend(msg) {
   }
 }
 
-function sendToPeer(peerId, msg) {
-  const stream = peers.get(peerId)
+function sendToPeer(streamPeerId, msg) {
+  const stream = peers.get(streamPeerId)
   if (stream && !stream.destroyed) {
     try {
       stream.write(JSON.stringify(msg) + '\n')
@@ -73,10 +74,10 @@ function sendToPeer(peerId, msg) {
   }
 }
 
-function relayToOtherPeers(fromPeerId, msg) {
+function relayToOtherPeers(fromStreamPeerId, msg) {
   const data = JSON.stringify(msg) + '\n'
   for (const [pid, stream] of peers) {
-    if (pid !== fromPeerId) {
+    if (pid !== fromStreamPeerId) {
       try {
         stream.write(data)
       } catch {}
@@ -109,13 +110,18 @@ function handleFrontendMessage(msg) {
   }
 }
 
+function cleanupPeers() {
+  for (const stream of peers.values()) {
+    try { stream.end() } catch {}
+  }
+  peers.clear()
+  peerInfo.clear()
+}
+
 function createRoom(content) {
   if (currentTopic) {
     swarm.leave(currentTopic)
-    for (const stream of peers.values()) {
-      try { stream.end() } catch {}
-    }
-    peers.clear()
+    cleanupPeers()
   }
 
   const id = Math.random().toString(36).slice(2, 8)
@@ -138,10 +144,7 @@ function createRoom(content) {
 function joinRoom(roomId, content) {
   if (currentTopic) {
     swarm.leave(currentTopic)
-    for (const stream of peers.values()) {
-      try { stream.end() } catch {}
-    }
-    peers.clear()
+    cleanupPeers()
   }
 
   currentRoomId = roomId
@@ -166,10 +169,7 @@ function leaveRoom() {
     currentTopic = null
   }
 
-  for (const stream of peers.values()) {
-    try { stream.end() } catch {}
-  }
-  peers.clear()
+  cleanupPeers()
   currentRoomId = null
   documentContent = ''
   documentVersion = 0
@@ -216,12 +216,12 @@ function broadcastToPeers(msg) {
 }
 
 swarm.on('connection', (stream) => {
-  const peerId = stream.remotePublicKey.toString('hex').slice(0, 16)
+  const streamPeerId = stream.remotePublicKey.toString('hex').slice(0, 16)
 
-  if (peers.has(peerId)) {
-    try { peers.get(peerId).end() } catch {}
+  if (peers.has(streamPeerId)) {
+    try { peers.get(streamPeerId).end() } catch {}
   }
-  peers.set(peerId, stream)
+  peers.set(streamPeerId, stream)
 
   let buffer = ''
 
@@ -234,7 +234,7 @@ swarm.on('connection', (stream) => {
       if (!line.trim()) continue
       try {
         const msg = JSON.parse(line)
-        handlePeerMessage(msg, peerId)
+        handlePeerMessage(msg, streamPeerId)
       } catch (err) {
         console.error('Parse error:', err)
       }
@@ -242,33 +242,44 @@ swarm.on('connection', (stream) => {
   })
 
   stream.on('close', () => {
-    if (peers.get(peerId) === stream) {
-      peers.delete(peerId)
+    if (peers.get(streamPeerId) === stream) {
+      peers.delete(streamPeerId)
+      const info = peerInfo.get(streamPeerId)
+      peerInfo.delete(streamPeerId)
+
       sendToFrontend({
         type: 'peer-disconnected',
-        peerId,
+        peerId: info ? info.peerId : streamPeerId,
         peerCount: peers.size,
       })
-      console.log(`Peer disconnected: ${peerId}`)
+      console.log(`Peer disconnected: ${streamPeerId}`)
     }
   })
 
   stream.on('error', (err) => {
-    console.error(`Stream error from ${peerId}:`, err)
-    if (peers.get(peerId) === stream) {
-      peers.delete(peerId)
+    console.error(`Stream error from ${streamPeerId}:`, err)
+    if (peers.get(streamPeerId) === stream) {
+      peers.delete(streamPeerId)
+      const info = peerInfo.get(streamPeerId)
+      peerInfo.delete(streamPeerId)
+
+      sendToFrontend({
+        type: 'peer-disconnected',
+        peerId: info ? info.peerId : streamPeerId,
+        peerCount: peers.size,
+      })
     }
   })
 
   sendToFrontend({
     type: 'peer-connected',
-    peerId,
+    peerId: streamPeerId,
     peerCount: peers.size,
   })
 
-  console.log(`Peer connected: ${peerId}`)
+  console.log(`Peer connected: ${streamPeerId}`)
 
-  sendToPeer(peerId, {
+  sendToPeer(streamPeerId, {
     type: 'sync',
     text: documentContent,
     version: documentVersion,
@@ -277,7 +288,7 @@ swarm.on('connection', (stream) => {
   })
 })
 
-function handlePeerMessage(msg, fromPeerId) {
+function handlePeerMessage(msg, fromStreamPeerId) {
   switch (msg.type) {
     case 'change': {
       if (msg.version > documentVersion) {
@@ -293,7 +304,7 @@ function handlePeerMessage(msg, fromPeerId) {
           peerId: msg.peerId,
         })
 
-        relayToOtherPeers(fromPeerId, {
+        relayToOtherPeers(fromStreamPeerId, {
           type: 'change',
           text: msg.text,
           version: msg.version,
@@ -307,6 +318,7 @@ function handlePeerMessage(msg, fromPeerId) {
     }
 
     case 'cursor':
+      peerInfo.set(fromStreamPeerId, { peerId: msg.peerId, name: msg.name })
       sendToFrontend({
         type: 'remote-cursor',
         position: msg.position,
@@ -314,10 +326,12 @@ function handlePeerMessage(msg, fromPeerId) {
         color: msg.color,
         name: msg.name,
       })
-      relayToOtherPeers(fromPeerId, msg)
+      relayToOtherPeers(fromStreamPeerId, msg)
       break
 
     case 'sync': {
+      peerInfo.set(fromStreamPeerId, { peerId: msg.peerId, name: msg.name || 'Writer' })
+
       if (msg.version > documentVersion && msg.text.length > 0) {
         documentContent = msg.text
         documentVersion = msg.version
@@ -329,7 +343,7 @@ function handlePeerMessage(msg, fromPeerId) {
         })
       }
 
-      sendToPeer(fromPeerId, {
+      sendToPeer(fromStreamPeerId, {
         type: 'sync-ack',
         text: documentContent,
         version: documentVersion,
@@ -340,6 +354,8 @@ function handlePeerMessage(msg, fromPeerId) {
     }
 
     case 'sync-ack': {
+      peerInfo.set(fromStreamPeerId, { peerId: msg.peerId, name: msg.name || 'Writer' })
+
       if (msg.version > documentVersion && msg.text.length > 0) {
         documentContent = msg.text
         documentVersion = msg.version
