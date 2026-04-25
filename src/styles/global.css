@@ -1,0 +1,64 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,600;0,700;1,300;1,400&family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
+
+@theme {
+  --color-bg: #f5f0e8;
+  --color-bg-subtle: #ebe5d9;
+  --color-paper: #fefcf7;
+  --color-paper-shadow: rgba(45, 35, 20, 0.08);
+  --color-ink: #2c2417;
+  --color-ink-light: #6b5e4d;
+  --color-ink-muted: #9e9183;
+  --color-accent: #c45d3e;
+  --color-accent-hover: #d4714f;
+  --color-border: #d9d0c3;
+  --color-border-light: #e8e1d5;
+  --color-toolbar-bg: #faf6ef;
+  --color-toolbar-hover: #f0ebe0;
+  --color-code-bg: #f0ebe0;
+
+  --font-body: 'Crimson Pro', Georgia, 'Times New Roman', serif;
+  --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+@layer base {
+  html {
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    font-family: var(--font-body);
+    background-color: var(--color-bg);
+    color: var(--color-ink);
+    min-height: 100vh;
+    line-height: 1.6;
+  }
+
+  ::selection {
+    background: var(--color-accent);
+    color: white;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-ink-muted);
+  }
+}
