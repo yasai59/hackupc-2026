@@ -138,12 +138,42 @@ fn get_sidecar_port() -> Option<u16> {
     *SIDECAR_PORT.lock().unwrap()
 }
 
+#[tauri::command]
+async fn save_file_dialog(
+    app: tauri::AppHandle,
+    content: String,
+    file_name: String,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel();
+
+    app.dialog().file()
+        .set_file_name(&file_name)
+        .add_filter("Markdown", &["md"])
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+
+    match rx.recv() {
+        Ok(Some(FilePath::Path(p))) => {
+            std::fs::write(&p, content).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        Ok(Some(FilePath::Url(_))) => Err("URL paths not supported".to_string()),
+        Ok(None) => Ok(false),
+        Err(_) => Err("Dialog failed".to_string()),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     eprintln!("[inkwell] App starting, PID: {}", std::process::id());
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_sidecar_port])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![get_sidecar_port, save_file_dialog])
         .setup(|app| {
             eprintln!("[inkwell] Setup running, PID: {}", std::process::id());
 

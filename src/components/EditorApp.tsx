@@ -139,14 +139,38 @@ export default function EditorApp() {
     }
   }, [content, handleFormat, handleContentChange]);
 
-  const handleDownload = useCallback(() => {
-    const blob = new Blob([content], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = (collabState.roomId || 'document') + '.md';
-    a.click();
-    URL.revokeObjectURL(url);
+  const handleDownload = useCallback(async () => {
+    const fileName = (collabState.roomId || 'document') + '.md';
+    const isTauri = typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__?.invoke;
+
+    if (isTauri) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      try {
+        await invoke('save_file_dialog', { content, fileName });
+      } catch { /* user cancelled */ }
+    } else if ('showSaveFilePicker' in window) {
+      const blob = new Blob([content], { type: 'text/markdown' });
+      try {
+        const handle = await (window as any).showSaveFilePicker({
+          suggestedName: fileName,
+          types: [{
+            description: 'Markdown File',
+            accept: { 'text/markdown': ['.md'] },
+          }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } catch { /* user cancelled */ }
+    } else {
+      const blob = new Blob([content], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
   }, [content, collabState.roomId]);
 
   return (

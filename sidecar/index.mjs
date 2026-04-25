@@ -9,6 +9,7 @@ const requestedPort = process.argv.includes('--port')
 const swarm = new Hyperswarm()
 const peers = new Map()
 const peerNames = new Map()
+const peerLeftNotified = new Set()
 let currentTopic = null
 let currentRoomId = null
 let documentContent = ''
@@ -55,6 +56,15 @@ wss.on('connection', (ws) => {
       content: documentContent,
       peerCount: peers.size,
     })
+
+    for (const [pid, name] of peerNames) {
+      sendToFrontend({
+        type: 'peer-connected',
+        peerId: pid,
+        peerCount: peers.size,
+        name: name || '',
+      })
+    }
   }
 })
 
@@ -84,13 +94,20 @@ function relayToOtherPeers(fromStreamPeerId, msg) {
   }
 }
 
+function requestSyncFromAllPeers() {
+  const msg = JSON.stringify({ type: 'request-sync', name: username }) + '\n'
+  for (const stream of peers.values()) {
+    try { stream.write(msg) } catch {}
+  }
+}
+
 function handleFrontendMessage(msg) {
   switch (msg.type) {
     case 'create':
       createRoom(msg.content)
       break
     case 'join':
-      joinRoom(msg.roomId, msg.content)
+      joinRoom(msg.roomId)
       break
     case 'leave':
       leaveRoom()
@@ -104,23 +121,36 @@ function handleFrontendMessage(msg) {
     case 'username':
       username = msg.username || 'Writer'
       break
+    case 'request-sync':
+      requestSyncFromAllPeers()
+      break
     default:
       break
   }
 }
 
-function cleanupPeers() {
+function announceLeaving() {
+  if (peers.size === 0) return
+  const msg = JSON.stringify({ type: 'peer-leaving', name: username }) + '\n'
+  for (const stream of peers.values()) {
+    try { stream.write(msg) } catch {}
+  }
+}
+
+function forceClosePeers() {
   for (const stream of peers.values()) {
     try { stream.end() } catch {}
   }
   peers.clear()
   peerNames.clear()
+  peerLeftNotified.clear()
 }
 
 function createRoom(content) {
   if (currentTopic) {
+    announceLeaving()
     swarm.leave(currentTopic)
-    cleanupPeers()
+    forceClosePeers()
   }
 
   const id = Math.random().toString(36).slice(2, 8)
@@ -140,14 +170,15 @@ function createRoom(content) {
   console.log(`Room created: ${currentRoomId}`)
 }
 
-function joinRoom(roomId, content) {
+function joinRoom(roomId) {
   if (currentTopic) {
+    announceLeaving()
     swarm.leave(currentTopic)
-    cleanupPeers()
+    forceClosePeers()
   }
 
   currentRoomId = roomId
-  documentContent = content || ''
+  documentContent = ''
   documentVersion = 0
   currentTopic = crypto.createHash('sha256').update(currentRoomId).digest()
 
@@ -156,7 +187,7 @@ function joinRoom(roomId, content) {
   sendToFrontend({
     type: 'room-joined',
     roomId: currentRoomId,
-    content: documentContent,
+    syncing: true,
   })
 
   console.log(`Joined room: ${currentRoomId}`)
@@ -164,11 +195,12 @@ function joinRoom(roomId, content) {
 
 function leaveRoom() {
   if (currentTopic) {
+    announceLeaving()
     swarm.leave(currentTopic)
     currentTopic = null
   }
 
-  cleanupPeers()
+  forceClosePeers()
   currentRoomId = null
   documentContent = ''
   documentVersion = 0
@@ -179,6 +211,8 @@ function leaveRoom() {
 }
 
 function handleChange(msg) {
+  if (!currentRoomId) return
+
   documentContent = msg.text
   documentVersion++
 
@@ -194,6 +228,8 @@ function handleChange(msg) {
 }
 
 function handleCursor(msg) {
+  if (!currentRoomId) return
+
   broadcastToPeers({
     type: 'cursor',
     position: msg.position,
@@ -213,14 +249,26 @@ function broadcastToPeers(msg) {
   }
 }
 
-function notifyPeerDisconnected(streamPeerId) {
-  const name = peerNames.get(streamPeerId)
+function notifyPeerLeft(streamPeerId) {
+  if (peerLeftNotified.has(streamPeerId)) return
+  peerLeftNotified.add(streamPeerId)
+
+  const name = peerNames.get(streamPeerId) || ''
+
   sendToFrontend({
     type: 'peer-disconnected',
     peerId: streamPeerId,
-    peerCount: peers.size,
-    name: name || '',
+    peerCount: Math.max(0, peers.size - 1),
+    name,
   })
+
+  for (const [pid, peerStream] of peers) {
+    if (pid !== streamPeerId) {
+      try {
+        peerStream.write(JSON.stringify({ type: 'peer-leaving', sourcePeerId: streamPeerId, name }) + '\n')
+      } catch {}
+    }
+  }
 }
 
 swarm.on('connection', (stream) => {
@@ -230,6 +278,7 @@ swarm.on('connection', (stream) => {
     try { peers.get(streamPeerId).end() } catch {}
   }
   peers.set(streamPeerId, stream)
+  peerLeftNotified.delete(streamPeerId)
 
   let buffer = ''
 
@@ -251,9 +300,10 @@ swarm.on('connection', (stream) => {
 
   stream.on('close', () => {
     if (peers.get(streamPeerId) === stream) {
+      const name = peerNames.get(streamPeerId) || ''
       peers.delete(streamPeerId)
       peerNames.delete(streamPeerId)
-      notifyPeerDisconnected(streamPeerId)
+      notifyPeerLeft(streamPeerId)
       console.log(`Peer disconnected: ${streamPeerId}`)
     }
   })
@@ -261,9 +311,10 @@ swarm.on('connection', (stream) => {
   stream.on('error', (err) => {
     console.error(`Stream error from ${streamPeerId}:`, err)
     if (peers.get(streamPeerId) === stream) {
+      const name = peerNames.get(streamPeerId) || ''
       peers.delete(streamPeerId)
       peerNames.delete(streamPeerId)
-      notifyPeerDisconnected(streamPeerId)
+      notifyPeerLeft(streamPeerId)
     }
   })
 
@@ -282,16 +333,38 @@ swarm.on('connection', (stream) => {
     version: documentVersion,
     name: username,
   })
+
+  sendToPeer(streamPeerId, {
+    type: 'request-sync',
+    name: username,
+  })
 })
 
 function handlePeerMessage(msg, fromStreamPeerId, fromStream) {
+  if (!currentRoomId && msg.type !== 'peer-leaving') return
+
   const senderName = msg.name || peerNames.get(fromStreamPeerId) || 'Writer'
   if (msg.name) peerNames.set(fromStreamPeerId, msg.name)
 
   const displayPeerId = msg.sourcePeerId || fromStreamPeerId
-  if (msg.sourcePeerId) peerNames.set(msg.sourcePeerId, senderName)
+  if (msg.sourcePeerId && msg.name) peerNames.set(msg.sourcePeerId, msg.name)
 
   switch (msg.type) {
+    case 'peer-leaving': {
+      const leavingId = msg.sourcePeerId || fromStreamPeerId
+      const leavingName = msg.name || peerNames.get(leavingId) || ''
+
+      if (peers.has(leavingId)) {
+        const leavingStream = peers.get(leavingId)
+        peers.delete(leavingId)
+        peerNames.delete(leavingId)
+        try { leavingStream.end() } catch {}
+      }
+
+      notifyPeerLeft(leavingId)
+      break
+    }
+
     case 'change': {
       if (msg.version > documentVersion) {
         documentContent = msg.text
@@ -339,7 +412,7 @@ function handlePeerMessage(msg, fromStreamPeerId, fromStream) {
       break
 
     case 'sync': {
-      if (msg.version > documentVersion && msg.text.length > 0) {
+      if (msg.version > documentVersion) {
         documentContent = msg.text
         documentVersion = msg.version
 
@@ -361,7 +434,7 @@ function handlePeerMessage(msg, fromStreamPeerId, fromStream) {
     }
 
     case 'sync-ack': {
-      if (msg.version > documentVersion && msg.text.length > 0) {
+      if (msg.version > documentVersion) {
         documentContent = msg.text
         documentVersion = msg.version
 
@@ -372,6 +445,22 @@ function handlePeerMessage(msg, fromStreamPeerId, fromStream) {
           peerName: senderName,
         })
       }
+      break
+    }
+
+    case 'request-sync': {
+      sendToPeer(fromStreamPeerId, {
+        type: 'sync',
+        text: documentContent,
+        version: documentVersion,
+        name: username,
+      })
+
+      relayToOtherPeers(fromStreamPeerId, {
+        type: 'request-sync',
+        name: username,
+        sourcePeerId: displayPeerId,
+      })
       break
     }
   }

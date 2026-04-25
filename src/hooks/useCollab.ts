@@ -146,19 +146,14 @@ export function useCollab(
 
       case 'room-joined': {
         const roomId = msg.roomId as string;
-        const sidecarContent = (msg.content as string) || '';
-        const savedContent = loadDoc(roomId);
-        const content = savedContent || sidecarContent;
         roomIdRef.current = roomId;
-        contentRef.current = content;
-        prevContentRef.current = content;
+        contentRef.current = '';
+        prevContentRef.current = '';
+        isRemoteRef.current = true;
+        onRemoteChangeRef.current('');
+        requestAnimationFrame(() => { isRemoteRef.current = false; });
         setRemoteCursors([]);
-        if (content) {
-          isRemoteRef.current = true;
-          onRemoteChangeRef.current(content);
-          requestAnimationFrame(() => { isRemoteRef.current = false; });
-        }
-        saveDoc(roomId, content);
+        if (roomIdRef.current) saveDoc(roomIdRef.current, '');
         setState(prev => ({
           ...prev,
           isConnected: true,
@@ -167,6 +162,9 @@ export function useCollab(
           error: null,
           savedRooms: getSavedRooms(),
         }));
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'request-sync' }));
+        }
         break;
       }
 
@@ -177,11 +175,9 @@ export function useCollab(
         contentRef.current = docContent;
         prevContentRef.current = docContent;
         setRemoteCursors([]);
-        if (docContent) {
-          isRemoteRef.current = true;
-          onRemoteChangeRef.current(docContent);
-          requestAnimationFrame(() => { isRemoteRef.current = false; });
-        }
+        isRemoteRef.current = true;
+        onRemoteChangeRef.current(docContent);
+        requestAnimationFrame(() => { isRemoteRef.current = false; });
         saveDoc(roomId, docContent);
         setState({
           isConnected: true,
@@ -200,7 +196,17 @@ export function useCollab(
       case 'peer-disconnected': {
         const disconnectedPeerId = (msg.peerId as string) || '';
         setState(prev => ({ ...prev, peerCount: msg.peerCount as number }));
-        setRemoteCursors(prev => prev.filter(c => c.peerId !== disconnectedPeerId));
+        if (disconnectedPeerId) {
+          setRemoteCursors(prev => prev.filter(c => c.peerId !== disconnectedPeerId));
+        }
+        break;
+      }
+
+      case 'peer-leaving': {
+        const leavingPeerId = (msg.peerId as string) || '';
+        if (leavingPeerId) {
+          setRemoteCursors(prev => prev.filter(c => c.peerId !== leavingPeerId));
+        }
         break;
       }
 
@@ -208,16 +214,12 @@ export function useCollab(
         const text = msg.text as string;
         isRemoteRef.current = true;
         if (typeof msg.editStart === 'number' && typeof msg.editDeletedLen === 'number' && typeof msg.editInsertedLen === 'number') {
-          setRemoteCursors(prev => {
-            const newCursors = prev.map(c => ({
+          setRemoteCursors(prev =>
+            prev.map(c => ({
               ...c,
               position: adjustPos(c.position, msg.editStart as number, msg.editDeletedLen as number, msg.editInsertedLen as number),
-            }));
-            if (msg.peerId) {
-              return newCursors.filter(c => c.peerId !== msg.peerId);
-            }
-            return newCursors;
-          });
+            }))
+          );
         }
         onRemoteChangeRef.current(text);
         prevContentRef.current = text;
@@ -250,6 +252,9 @@ export function useCollab(
         roomIdRef.current = null;
         contentRef.current = '';
         prevContentRef.current = '';
+        isRemoteRef.current = true;
+        onRemoteChangeRef.current('');
+        requestAnimationFrame(() => { isRemoteRef.current = false; });
         break;
     }
   }, []);
@@ -321,7 +326,7 @@ export function useCollab(
 
   const joinRoom = useCallback((id: string) => {
     setRemoteCursors([]);
-    sendToSidecar({ type: 'join', roomId: id, content: contentRef.current });
+    sendToSidecar({ type: 'join', roomId: id });
   }, [sendToSidecar]);
 
   const disconnect = useCallback(() => {

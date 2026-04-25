@@ -47,6 +47,8 @@ function getCursorCoords(position: number, text: string, textarea: HTMLTextAreaE
 export default function RemoteCursors({ cursors, text, textareaRef }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState<Map<string, { top: number; left: number }>>(new Map());
+  const prevCursorsRef = useRef<Set<string>>(new Set());
+  const newCursorRef = useRef<Set<string>>(new Set());
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -54,13 +56,33 @@ export default function RemoteCursors({ cursors, text, textareaRef }: Props) {
     if (!textarea || !wrapper) return;
 
     const newCoords = new Map<string, { top: number; left: number }>();
+    const currentIds = new Set<string>();
 
     for (const cursor of cursors) {
       const pos = Math.min(cursor.position, text.length);
       const { top, left } = getCursorCoords(pos, text, textarea, wrapper);
       newCoords.set(cursor.peerId, { top, left });
+      currentIds.add(cursor.peerId);
     }
 
+    // Detectar cursores nuevos para animar su entrada
+    const newlyArrived = new Set<string>();
+    for (const id of currentIds) {
+      if (!prevCursorsRef.current.has(id)) {
+        newlyArrived.add(id);
+      }
+    }
+    if (newlyArrived.size > 0) {
+      newCursorRef.current = newlyArrived;
+      // Limpiar el flag de nuevo cursor después de la animación de entrada
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          newCursorRef.current = new Set();
+        });
+      });
+    }
+
+    prevCursorsRef.current = currentIds;
     setCoords(newCoords);
   }, [cursors, text, textareaRef]);
 
@@ -69,6 +91,7 @@ export default function RemoteCursors({ cursors, text, textareaRef }: Props) {
       {cursors.map(cursor => {
         const pos = coords.get(cursor.peerId);
         if (!pos) return null;
+        const isNew = newCursorRef.current.has(cursor.peerId);
         return (
           <div
             key={cursor.peerId}
@@ -76,11 +99,21 @@ export default function RemoteCursors({ cursors, text, textareaRef }: Props) {
               top: pos.top,
               left: pos.left,
               background: cursor.color,
+              willChange: 'transform, top, left',
             }}
-            className="absolute w-[2px] h-[29.75px] rounded-sm transition-[top,left] duration-[80ms] ease-out opacity-85"
+            className={[
+              'absolute w-[2px] h-[29.75px] rounded-sm opacity-85',
+              'transition-all duration-150 ease-out',
+              isNew ? 'opacity-0 scale-y-0' : 'opacity-85 scale-y-100',
+            ].join(' ')}
           >
             <div
-              style={{ background: cursor.color }}
+              style={{
+                background: cursor.color,
+                transition: 'transform 150ms ease-out, opacity 150ms ease-out',
+                transform: isNew ? 'translateY(-4px)' : 'translateY(0)',
+                opacity: isNew ? 0 : 1,
+              }}
               className="absolute -top-[18px] -left-[1px] text-[10px] leading-[14px] font-ui font-semibold text-white px-1 py-0.5 rounded-[3px_3px_3px_0] whitespace-nowrap"
             >
               {cursor.name} ({cursor.peerId.slice(-4)})
