@@ -119,6 +119,21 @@ export function useCollab(
     }
   }, [username]);
 
+  function applyRemoteChange(text: string, msg: Record<string, unknown>) {
+    isRemoteRef.current = true;
+    if (typeof msg.editStart === 'number' && typeof msg.editDeletedLen === 'number' && typeof msg.editInsertedLen === 'number') {
+      setRemoteCursors(prev => prev.map(c => ({
+        ...c,
+        position: adjustPos(c.position, msg.editStart as number, msg.editDeletedLen as number, msg.editInsertedLen as number),
+      })));
+    }
+    onRemoteChangeRef.current(text);
+    prevContentRef.current = text;
+    contentRef.current = text;
+    if (roomIdRef.current) saveDoc(roomIdRef.current, text);
+    requestAnimationFrame(() => { isRemoteRef.current = false; });
+  }
+
   function processMessage(msg: Record<string, unknown>) {
     switch (msg.type) {
       case 'connected':
@@ -152,14 +167,14 @@ export function useCollab(
         roomIdRef.current = roomId;
         const savedContent = loadDoc(roomId);
         const content = savedContent || docContent;
+        contentRef.current = content;
+        prevContentRef.current = content;
         if (content) {
-          contentRef.current = content;
-          prevContentRef.current = content;
           isRemoteRef.current = true;
           onRemoteChangeRef.current(content);
           requestAnimationFrame(() => { isRemoteRef.current = false; });
         }
-        if (!savedContent) saveDoc(roomId, docContent);
+        saveDoc(roomId, content);
         setState(prev => ({
           ...prev,
           isConnected: true,
@@ -203,19 +218,8 @@ export function useCollab(
         break;
 
       case 'remote-change': {
-        isRemoteRef.current = true;
         const text = msg.text as string;
-        if (typeof msg.editStart === 'number' && typeof msg.editDeletedLen === 'number' && typeof msg.editInsertedLen === 'number') {
-          setRemoteCursors(prev => prev.map(c => ({
-            ...c,
-            position: adjustPos(c.position, msg.editStart as number, msg.editDeletedLen as number, msg.editInsertedLen as number),
-          })));
-        }
-        onRemoteChangeRef.current(text);
-        prevContentRef.current = text;
-        contentRef.current = text;
-        if (roomIdRef.current) saveDoc(roomIdRef.current, text);
-        requestAnimationFrame(() => { isRemoteRef.current = false; });
+        applyRemoteChange(text, msg);
         break;
       }
 

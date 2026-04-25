@@ -11,14 +11,12 @@ const peers = new Map()
 let currentTopic = null
 let currentRoomId = null
 let documentContent = ''
-let isRoomCreator = false
-let awaitingInitialSync = false
+let syncedWithPeer = false
 let username = 'Writer'
 let myPeerId = crypto.randomBytes(8).toString('hex')
 
 const wss = new WebSocketServer({ port: requestedPort, host: '127.0.0.1' })
 
-// Wait for the server to be listening before reading the port
 await new Promise((resolve) => {
   wss.on('listening', resolve)
 })
@@ -30,6 +28,9 @@ process.stderr.write(`SIDECAR_PORT:${SWARM_PORT}\n`)
 let frontendClient = null
 
 wss.on('connection', (ws) => {
+  if (frontendClient && frontendClient.readyState === 1) {
+    frontendClient.close()
+  }
   frontendClient = ws
 
   ws.on('message', (raw) => {
@@ -60,6 +61,17 @@ wss.on('connection', (ws) => {
 function sendToFrontend(msg) {
   if (frontendClient && frontendClient.readyState === 1) {
     frontendClient.send(JSON.stringify(msg))
+  }
+}
+
+function broadcastToPeers(msg) {
+  const data = JSON.stringify(msg) + '\n'
+  for (const stream of peers.values()) {
+    try {
+      stream.write(data)
+    } catch (err) {
+      console.error('Error sending to peer:', err)
+    }
   }
 }
 
@@ -94,8 +106,7 @@ function createRoom(content) {
   const id = Math.random().toString(36).slice(2, 8)
   currentRoomId = 'inkwell-' + id
   documentContent = content || ''
-  isRoomCreator = true
-  awaitingInitialSync = false
+  syncedWithPeer = true
   const topicBuffer = crypto.createHash('sha256').update(currentRoomId).digest()
 
   currentTopic = topicBuffer
@@ -115,8 +126,7 @@ function joinRoom(roomId, content) {
 
   currentRoomId = roomId
   documentContent = content || ''
-  isRoomCreator = false
-  awaitingInitialSync = true
+  syncedWithPeer = false
   const topicBuffer = crypto.createHash('sha256').update(currentRoomId).digest()
 
   currentTopic = topicBuffer
@@ -142,8 +152,8 @@ function leaveRoom() {
   }
   peers.clear()
   currentRoomId = null
-  isRoomCreator = false
-  awaitingInitialSync = false
+  documentContent = ''
+  syncedWithPeer = false
 
   sendToFrontend({
     type: 'left',
@@ -175,17 +185,6 @@ function handleCursor(msg) {
   })
 }
 
-function broadcastToPeers(msg) {
-  const data = JSON.stringify(msg) + '\n'
-  for (const stream of peers.values()) {
-    try {
-      stream.write(data)
-    } catch (err) {
-      console.error('Error sending to peer:', err)
-    }
-  }
-}
-
 swarm.on('connection', (stream) => {
   const peerId = stream.remotePublicKey.toString('hex').slice(0, 16)
   peers.set(peerId, stream)
@@ -201,7 +200,7 @@ swarm.on('connection', (stream) => {
       if (!line.trim()) continue
       try {
         const msg = JSON.parse(line)
-        handlePeerMessage(msg, peerId)
+        handlePeerMessage(msg, peerId, stream)
       } catch (err) {
         console.error('Parse error:', err)
       }
@@ -209,18 +208,22 @@ swarm.on('connection', (stream) => {
   })
 
   stream.on('close', () => {
-    peers.delete(peerId)
-    sendToFrontend({
-      type: 'peer-disconnected',
-      peerId,
-      peerCount: peers.size,
-    })
-    console.log(`Peer disconnected: ${peerId}`)
+    if (peers.get(peerId) === stream) {
+      peers.delete(peerId)
+      sendToFrontend({
+        type: 'peer-disconnected',
+        peerId,
+        peerCount: peers.size,
+      })
+      console.log(`Peer disconnected: ${peerId}`)
+    }
   })
 
   stream.on('error', (err) => {
     console.error(`Stream error from ${peerId}:`, err)
-    peers.delete(peerId)
+    if (peers.get(peerId) === stream) {
+      peers.delete(peerId)
+    }
   })
 
   sendToFrontend({
@@ -232,19 +235,27 @@ swarm.on('connection', (stream) => {
   console.log(`Peer connected: ${peerId}`)
 
   stream.write(JSON.stringify({
-    type: 'sync-response',
+    type: 'sync',
     text: documentContent,
     peerId: myPeerId,
     name: username,
   }) + '\n')
 })
 
-function handlePeerMessage(msg, fromPeerId) {
+function handlePeerMessage(msg, fromPeerId, fromStream) {
   switch (msg.type) {
     case 'change':
       documentContent = msg.text
       sendToFrontend({
         type: 'remote-change',
+        text: msg.text,
+        editStart: msg.editStart,
+        editDeletedLen: msg.editDeletedLen,
+        editInsertedLen: msg.editInsertedLen,
+        peerId: msg.peerId,
+      })
+      broadcastToPeers({
+        type: 'change',
         text: msg.text,
         editStart: msg.editStart,
         editDeletedLen: msg.editDeletedLen,
@@ -263,16 +274,34 @@ function handlePeerMessage(msg, fromPeerId) {
       })
       break
 
-    case 'sync-response':
-      if (awaitingInitialSync || documentContent.length === 0) {
+    case 'sync':
+      if (!syncedWithPeer || msg.text.length > documentContent.length) {
         documentContent = msg.text
-        awaitingInitialSync = false
+        syncedWithPeer = true
+        sendToFrontend({
+          type: 'remote-change',
+          text: msg.text,
+          peerId: msg.peerId || fromPeerId,
+        })
       }
-      sendToFrontend({
-        type: 'remote-change',
+      fromStream.write(JSON.stringify({
+        type: 'sync-ack',
         text: documentContent,
-        peerId: msg.peerId || fromPeerId,
-      })
+        peerId: myPeerId,
+        name: username,
+      }) + '\n')
+      break
+
+    case 'sync-ack':
+      if (!syncedWithPeer || msg.text.length > documentContent.length) {
+        documentContent = msg.text
+        syncedWithPeer = true
+        sendToFrontend({
+          type: 'remote-change',
+          text: msg.text,
+          peerId: msg.peerId || fromPeerId,
+        })
+      }
       break
   }
 }
