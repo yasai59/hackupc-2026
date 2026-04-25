@@ -6,235 +6,190 @@
 
 ### Filosofía de Diseño
 
-Inkwell usa un sistema de diseño inspirado en **papel y tinta**, con una paleta cálida que evoca un cuaderno físico. Los colores son terrosos y suaves, evitando los blancos puros y los negros absolutos.
+Inkwell usa un sistema de diseño inspirado en **papel y tinta**, con una paleta cálida que evoca un cuaderno físico. Los estilos se implementan con **TailwindCSS v4** usando `@theme` para design tokens y `@tailwindcss/typography` para estilos de markdown.
 
-## Design Tokens (CSS Custom Properties)
+## Design Tokens (TailwindCSS @theme)
 
 ### Colores de Fondo
 
-| Variable | Valor | Uso |
+| Token | Valor | Uso |
 |---|---|---|
-| `--bg` | `#f5f0e8` | Fondo principal de la página (beige cálido) |
-| `--bg-subtle` | `#ebe5d9` | Fondo secundario (beige más oscuro) |
-| `--paper` | `#fefcf7` | Fondo de las "hojas" de papel (blanco cremoso) |
-| `--paper-shadow` | `rgba(45, 35, 20, 0.08)` | Sombra sutil de las hojas |
-| `--toolbar-bg` | `#faf6ef` | Fondo de la toolbar |
-| `--toolbar-hover` | `#f0ebe0` | Fondo hover de botones en toolbar |
-| `--code-bg` | `#f0ebe0` | Fondo de bloques de código e IDs |
+| `--color-bg` | `#f5f0e8` | Fondo principal (beige cálido) |
+| `--color-bg-subtle` | `#ebe5d9` | Fondo secundario |
+| `--color-paper` | `#fefcf7` | Fondo de "hojas" (blanco cremoso) |
+| `--color-paper-shadow` | `rgba(45, 35, 20, 0.08)` | Sombra de hojas |
+| `--color-toolbar-bg` | `#faf6ef` | Fondo de toolbar |
+| `--color-toolbar-hover` | `#f0ebe0` | Hover de botones |
+| `--color-code-bg` | `#f0ebe0` | Fondo de código e IDs |
 
 ### Colores de Texto
 
-| Variable | Valor | Uso |
+| Token | Valor | Uso |
 |---|---|---|
-| `--ink` | `#2c2417` | Texto principal (marrón muy oscuro, casi negro) |
-| `--ink-light` | `#6b5e4d` | Texto secundario (marrón medio) |
-| `--ink-muted` | `#9e9183` | Texto terciario (gris cálido) |
+| `--color-ink` | `#2c2417` | Texto principal (marrón oscuro) |
+| `--color-ink-light` | `#6b5e4d` | Texto secundario |
+| `--color-ink-muted` | `#9e9183` | Texto terciario |
 
 ### Color de Acento
 
-| Variable | Valor | Uso |
+| Token | Valor | Uso |
 |---|---|---|
-| `--accent` | `#c45d3e` | Color principal de acción (terracota/rojo arcilla) |
-| `--accent-hover` | `#d4714f` | Hover del acento (terracota más claro) |
+| `--color-accent` | `#c45d3e` | Color principal (terracota) |
+| `--color-accent-hover` | `#d4714f` | Hover del acento |
 
 ### Bordes
 
-| Variable | Valor | Uso |
+| Token | Valor | Uso |
 |---|---|---|
-| `--border` | `#d9d0c3` | Bordes estándar |
-| `--border-light` | `#e8e1d5` | Bordes sutiles |
+| `--color-border` | `#d9d0c3` | Bordes estándar |
+| `--color-border-light` | `#e8e1d5` | Bordes sutiles |
 
 ### Tipografía
 
-| Variable | Valor | Uso |
+| Token | Valor | Uso |
 |---|---|---|
-| `--font-body` | `'Crimson Pro', Georgia, serif` | Cuerpo del texto, editor, preview |
-| `--font-ui` | `'DM Sans', -apple-system, sans-serif` | UI elements, botones, labels |
+| `--font-body` | `'Crimson Pro', Georgia, serif` | Cuerpo del texto |
+| `--font-ui` | `'DM Sans', -apple-system, sans-serif` | UI elements |
 
 ### Radios de Borde
 
-| Variable | Valor | Uso |
+| Token | Valor | Uso |
 |---|---|---|
-| `--radius-sm` | `4px` | Botones pequeños, inputs |
-| `--radius-md` | `8px` | Hojas de papel, cards |
+| `--radius-sm` | `4px` | Botones pequeños |
+| `--radius-md` | `8px` | Hojas de papel |
 | `--radius-lg` | `12px` | Contenedores grandes |
 
-### Fuentes Externas
+## TailwindCSS v4 Configuración
 
-Se cargan desde Google Fonts:
-
-```css
-@import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,600;0,700;1,300;1,400&family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
-```
-
-- **Crimson Pro**: serif con pesos 300-700, italic incluido. Elegante y legible para texto largo.
-- **DM Sans**: sans-serif con pesos 400-700. Moderna y clara para elementos de UI.
-
-## Estilos Globales
-
-### Reset Básico
+### `global.css`
 
 ```css
-*, *::before, *::after {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --color-bg: #f5f0e8;
+  --color-paper: #fefcf7;
+  --color-ink: #2c2417;
+  --color-accent: #c45d3e;
+  /* ... más tokens */
+  --font-body: 'Crimson Pro', Georgia, serif;
+  --font-ui: 'DM Sans', -apple-system, sans-serif;
 }
 ```
 
-### HTML
+### `astro.config.mjs`
+
+```js
+import tailwindcss from '@tailwindcss/vite';
+
+export default defineConfig({
+  integrations: [react()],
+  vite: {
+    plugins: [tailwindcss()]
+  }
+});
+```
+
+## Estilos de Markdown (Prose)
+
+La vista previa usa `@tailwindcss/typography` con estilos customizados bajo `@layer base`:
+
+### Títulos
 
 ```css
-html {
-  font-size: 16px;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+.prose h1 { font-size: 2em; font-weight: 700; line-height: 1.3; }
+.prose h2 { font-size: 1.5em; font-weight: 600; line-height: 1.35; }
+.prose h3 { font-size: 1.25em; font-weight: 600; line-height: 1.4; }
+```
+
+### Listas
+
+```css
+.prose ul { list-style-type: disc; padding-left: 1.5em; }
+.prose ol { list-style-type: decimal; padding-left: 1.5em; }
+.prose li::marker { color: var(--color-accent); }
+```
+
+### Blockquotes
+
+```css
+.prose blockquote {
+  border-left: 3px solid var(--color-accent);
+  background: var(--color-bg-subtle);
+  padding: 0.75em 1em;
+  border-radius: 0 6px 6px 0;
+  font-style: italic;
 }
 ```
 
-Suavizado de fuentes para mejor renderizado en macOS.
-
-### Body
+### Código
 
 ```css
-body {
-  font-family: var(--font-body);
-  background-color: var(--bg);
-  color: var(--ink);
-  min-height: 100vh;
-  line-height: 1.6;
+.prose code {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  background: var(--color-code-bg);
+  color: var(--color-accent);
+  padding: 0.15em 0.35em;
+  border-radius: 3px;
+}
+
+.prose pre {
+  background: var(--color-ink);
+  color: #e8e1d5;
+  border-radius: 8px;
+  padding: 1em;
 }
 ```
 
-### Selección de Texto
+### Tablas
 
 ```css
-::selection {
-  background: var(--accent);
-  color: white;
+.prose th {
+  background: var(--color-code-bg);
+  font-family: var(--font-ui);
+  font-weight: 600;
 }
 ```
 
-El texto seleccionado usa el color terracota de acento con texto blanco.
+## Uso en Componentes
 
-### Scrollbar Personalizado
-
-```css
-::-webkit-scrollbar {
-  width: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--ink-muted);
-}
-```
-
-Scrollbar delgado y sutil que se oscurece al hover.
-
-## Estilos Inline en Componentes
-
-Los componentes React usan **inline styles** con objetos JavaScript en lugar de CSS classes. Esto permite:
-
-1. Usar variables CSS directamente en los valores
-2. Calcular estilos dinámicamente
-3. Evitar colisiones de nombres
-
-### Patrón Común
+### Patrón con Tailwind
 
 ```tsx
-const styles: Record<string, CSSProperties> = {
-  wrapper: {
-    display: 'flex',
-    justifyContent: 'center',
-    flex: 1,
-  },
-  paper: {
-    width: '100%',
-    maxWidth: '780px',
-    background: 'var(--paper)',
-    borderRadius: 'var(--radius-md)',
-    boxShadow: '0 1px 3px var(--paper-shadow), 0 8px 24px var(--paper-shadow)',
-    // ...
-  },
-};
+<div className="flex flex-col min-h-screen">
+  <CollabBar ... />
+  <Toolbar ... />
+  <div className="flex flex-row items-start">
+    <Editor ... />
+    <MarkdownPreview ... />
+  </div>
+</div>
 ```
 
-### Uso de Variables CSS en Inline Styles
+### Hover Effects
 
-Las variables CSS funcionan en inline styles porque el navegador las resuelve en el renderizado:
+Tailwind maneja hovers directamente con clases:
 
 ```tsx
-<div style={{
-  background: 'var(--paper)',
-  color: 'var(--ink)',
-  boxShadow: '0 1px 3px var(--paper-shadow)',
-}}>
+<button className="hover:bg-toolbar-hover hover:text-ink transition-all duration-150">
+  Click
+</button>
 ```
 
-### Hover Effects Inline
+### Valores Arbitrarios
 
-Como los inline styles no soportan pseudo-clases directamente, se implementan con event handlers:
+Para medidas exactas que no están en el scale de Tailwind:
 
 ```tsx
-<button
-  onMouseEnter={(e) => {
-    e.currentTarget.style.background = 'var(--toolbar-hover)';
-    e.currentTarget.style.color = 'var(--ink)';
-  }}
-  onMouseLeave={(e) => {
-    e.currentTarget.style.background = 'none';
-    e.currentTarget.style.color = 'var(--ink-light)';
-  }}
->
-```
-
-## Layout Visual
-
-```
-┌──────────────────────────────────────────────────────┐
-│  --bg (#f5f0e8) - Fondo de toda la página            │
-│                                                      │
-│  ┌────────────────────────────────────────────────┐ │
-│  │  CollabBar - --toolbar-bg                      │ │
-│  │  border-bottom: 1px solid --border-light       │ │
-│  └────────────────────────────────────────────────┘ │
-│  ┌────────────────────────────────────────────────┐ │
-│  │  Toolbar - --toolbar-bg                        │ │
-│  │  border-bottom: 1px solid --border-light       │ │
-│  └────────────────────────────────────────────────┘ │
-│                                                      │
-│  ┌────────────────────┐  ┌────────────────────┐    │
-│  │  Editor            │  │  Preview           │    │
-│  │  --paper           │  │  --paper           │    │
-│  │  maxWidth: 780px   │  │  maxWidth: 780px   │    │
-│  │  box-shadow        │  │  box-shadow        │    │
-│  │                    │  │                    │    │
-│  │  ┌───┐ ┌───────┐  │  │  Contenido HTML    │    │
-│  │  │LN │ │textarea│  │  │  --font-body       │    │
-│  │  │   │ │       │  │  │  --ink             │    │
-│  │  └───┘ └───────┘  │  │                    │    │
-│  │                    │  │                    │    │
-│  └────────────────────┘  └────────────────────┘    │
-│                                                      │
-└──────────────────────────────────────────────────────┘
+<div className="max-w-[780px] text-[17px] leading-[1.75] h-[29.75px]">
 ```
 
 ## Paleta de Cursores Remotos
 
-Los cursores remotos usan colores distintos del acento principal para diferenciarse:
-
 ```typescript
 const CURSOR_COLORS = [
-  '#c45d3e', // terracota (también es el --accent)
+  '#c45d3e', // terracota
   '#2d8a4e', // verde bosque
   '#4a6fa5', // azul acero
   '#9b59b6', // púrpura
@@ -244,5 +199,3 @@ const CURSOR_COLORS = [
   '#3498db', // azul claro
 ];
 ```
-
-Cada peer recibe uno aleatoriamente al conectarse.

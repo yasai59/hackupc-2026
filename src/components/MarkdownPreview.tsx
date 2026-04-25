@@ -20,7 +20,7 @@ export default function MarkdownPreview({ markdown }: Props) {
     <div className="flex justify-center p-8 px-6 pb-12 flex-1">
       <div className="w-full max-w-[780px] bg-paper rounded-md shadow-[0_1px_3px_var(--color-paper-shadow),0_8px_24px_var(--color-paper-shadow)] border border-border-light p-12">
         <div
-          className="font-body text-[17px] leading-[1.75] text-ink"
+          className="prose"
           dangerouslySetInnerHTML={{ __html: html }}
         />
       </div>

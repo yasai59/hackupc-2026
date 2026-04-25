@@ -11,10 +11,20 @@ v2/
 ├── .vscode/                   # Configuración de VS Code
 │   ├── extensions.json        # Extensiones recomendadas
 │   └── launch.json            # Configuración de debug
+├── docs/                      # Documentación del proyecto
+│   ├── 00-overview.md         # Descripción general y arquitectura
+│   ├── 01-project-structure.md# Este archivo
+│   ├── 02-p2p-collaboration.md# Arquitectura P2P con Hyperswarm
+│   ├── 03-components.md       # Componentes React
+│   ├── 04-useCollab-hook.md   # Hook useCollab
+│   └── 05-styling.md          # Sistema de estilos TailwindCSS
 ├── public/                    # Assets estáticos (se copian tal cual al build)
 │   ├── favicon.ico
 │   └── favicon.svg
-├── src/                       # Código fuente
+├── sidecar/                   # Sidecar Node.js P2P (desarrollo)
+│   ├── index.mjs              # Servidor Hyperswarm + WebSocket
+│   └── package.json           # Deps: hyperswarm, ws
+├── src/                       # Código fuente del frontend
 │   ├── components/            # Componentes React
 │   │   ├── CollabBar.tsx      # Barra de colaboración (crear/unirse a salas)
 │   │   ├── Editor.tsx         # Editor de texto con números de línea
@@ -23,14 +33,26 @@ v2/
 │   │   ├── RemoteCursors.tsx  # Overlay de cursores remotos
 │   │   └── Toolbar.tsx        # Barra de herramientas de formato
 │   ├── hooks/
-│   │   └── useCollab.ts       # Hook principal de colaboración P2P
+│   │   └── useCollab.ts       # Hook principal de colaboración P2P (WebSocket)
 │   ├── layouts/
 │   │   └── Base.astro         # Layout HTML base con meta tags
 │   ├── pages/
 │   │   └── index.astro        # Página principal (ruta /)
 │   └── styles/
-│       └── global.css         # Variables CSS y estilos globales
-├── astro.config.mjs           # Configuración de Astro
+│       └── global.css         # TailwindCSS + design tokens + prose styles
+├── src-tauri/                 # App de escritorio Tauri
+│   ├── Cargo.toml             # Deps Rust (tauri, which)
+│   ├── capabilities/
+│   │   └── default.json       # Permisos de la app
+│   ├── icons/                 # Iconos de la app
+│   ├── resources/             # Recursos empaquetados
+│   │   └── sidecar/           # Copia del sidecar para producción
+│   ├── src/
+│   │   ├── lib.rs             # Backend Rust: auto-start/stop del sidecar
+│   │   └── main.rs            # Entry point de la app
+│   ├── target/                # Output de compilación Rust
+│   └── tauri.conf.json        # Configuración de Tauri
+├── astro.config.mjs           # Configuración de Astro + TailwindCSS
 ├── package.json               # Dependencias y scripts
 ├── tsconfig.json              # Configuración de TypeScript
 └── .gitignore                 # Archivos ignorados por git
@@ -38,122 +60,115 @@ v2/
 
 ## Descripción de Cada Archivo
 
-### Configuración
+### Configuración del Frontend
 
 #### `astro.config.mjs`
-Configuración mínima de Astro. Únicamente habilita la integración de React para poder usar componentes `.tsx` dentro del proyecto.
+Configuración de Astro con integración de React y plugin de TailwindCSS vía Vite.
 
 ```js
 import { defineConfig } from 'astro/config';
 import react from '@astrojs/react';
+import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
-  integrations: [react()]
+  integrations: [react()],
+  vite: {
+    plugins: [tailwindcss()]
+  }
 });
 ```
 
 #### `tsconfig.json`
-Extiende la configuración estricta de Astro y configura JSX para React 17+ con el pragma automático.
-
-```json
-{
-  "extends": "astro/tsconfigs/strict",
-  "compilerOptions": {
-    "jsx": "react-jsx",
-    "jsxImportSource": "react"
-  }
-}
-```
+Extiende la configuración estricta de Astro y configura JSX para React 17+.
 
 #### `package.json`
 Define las dependencias del proyecto. Requiere Node.js >= 22.12.0.
 
-**Dependencias clave:**
+**Dependencias frontend:**
 - `astro` — Framework principal
 - `@astrojs/react` — Integración React
-- `peerjs` — WebRTC simplificado para P2P
+- `@tauri-apps/api` — API de Tauri para el frontend
+- `tailwindcss` + `@tailwindcss/typography` — Estilos
 - `marked` — Parser Markdown → HTML
 - `react` / `react-dom` — Librería UI
-- `typescript` — Tipado estático
+
+**DevDependencies:**
+- `@tauri-apps/cli` — CLI de Tauri
+- `@tailwindcss/vite` — Plugin Vite de TailwindCSS
+- `concurrently` — Ejecutar múltiples comandos en paralelo
+
+### App de Escritorio (Tauri)
+
+#### `src-tauri/tauri.conf.json`
+Configuración de la app de escritorio:
+- Ventana de 1280x800, centrada
+- Frontend: `../dist` (build de Astro)
+- Dev URL: `http://localhost:4321`
+- CSP: permite WebSocket a `ws://localhost:9876`
+- Resources: empaqueta `resources/sidecar/**/*` dentro del `.app`
+
+#### `src-tauri/Cargo.toml`
+Dependencias Rust:
+- `tauri` — Framework principal
+- `tauri-plugin-log` — Logging
+- `which` — Localizar binario de `node` en el PATH
+
+#### `src-tauri/src/lib.rs`
+Backend Rust de la app Tauri:
+- **`start_sidecar()`**: Localiza `node` en el PATH, ejecuta el sidecar desde `resources/sidecar/index.mjs`
+- **`stop_sidecar()`**: Mata el proceso del sidecar al cerrar la ventana
+- El sidecar se auto-inicia en el setup de Tauri y se mata en `WindowEvent::Destroyed`
+
+#### `src-tauri/src/main.rs`
+Entry point. Previene ventana de consola en Windows release.
+
+### Sidecar P2P
+
+#### `sidecar/index.mjs`
+Servidor Node.js que corre junto a la app:
+- **WebSocket Server** (`localhost:9876`): puente entre el frontend React y la red P2P
+- **Hyperswarm**: DHT descentralizada para descubrimiento y conexión entre peers
+- Gestiona salas, sincronización de documentos, broadcast de cambios y cursores
+
+#### `sidecar/package.json`
+Dependencias del sidecar:
+- `hyperswarm` — DHT P2P descentralizada (descubrimiento + conexión directa)
+- `ws` — Servidor WebSocket
 
 ### Páginas y Layouts
 
 #### `src/pages/index.astro`
-La única página del proyecto. Importa el layout `Base` y el componente React `EditorApp`. La directiva `client:load` hidrata el componente React inmediatamente en el cliente, ya que toda la lógica de edición y colaboración es client-side.
-
-```astro
-<Base>
-  <EditorApp client:load />
-</Base>
-```
+La única página del proyecto. Importa el layout `Base` y el componente React `EditorApp` con `client:load`.
 
 #### `src/layouts/Base.astro`
-Layout HTML base que envuelve todas las páginas. Define:
-- Meta charset y viewport
-- Favicon SVG
-- Título por defecto: "Inkwell — Markdown Editor"
-- Importa los estilos globales con `is:global`
+Layout HTML base con meta tags, favicon y estilos globales.
 
 ### Componentes React
 
 #### `src/components/EditorApp.tsx`
-**Componente raíz de la aplicación.** Orquesta todos los demás componentes y gestiona:
-- Estado del contenido del documento
-- Integración con el hook `useCollab`
-- Formateo de texto (bold, italic, headings, etc.)
-- Atajos de teclado (Ctrl+B, Ctrl+I, Tab)
-- Descarga del archivo `.md`
-- Throttle del broadcast de cursor (50ms)
+Componente raíz. Orquesta toolbar, editor, preview y collab bar. Gestiona formateo de texto, atajos de teclado y descarga.
 
 #### `src/components/Editor.tsx`
-**El editor de texto principal.** Contiene:
-- `textarea` auto-expandible que crece con el contenido
-- Números de línea generados dinámicamente
-- Continuación automática de listas (ul/ol) al pulsar Enter
-- Detección de línea vacía para cerrar listas
-- Overlay de `RemoteCursors` superpuesto
+Editor de texto con textarea auto-expandible, números de línea, continuación de listas y overlay de cursores remotos.
 
 #### `src/components/MarkdownPreview.tsx`
-**Vista previa del Markdown.** Usa `marked` para parsear el contenido a HTML. El parseo se memoiza con `useMemo` para evitar re-renderizados innecesarios. Usa `dangerouslySetInnerHTML` para renderizar el HTML resultante.
+Vista previa del Markdown. Usa `marked` con GFM y renderiza con clase `prose` de Tailwind Typography.
 
 #### `src/components/Toolbar.tsx`
-**Barra de herramientas superior.** Contiene:
-- Logo "inkwell"
-- Botones de formato: H1, H2, H3, Bold, Italic, Strikethrough, Quote, Code, Code Block, HR, UL, OL, Link
-- Botón de descarga `.md`
-- Contador de palabras y caracteres
+Barra de herramientas con botones de formato, contador de palabras/caracteres y botón de descarga.
 
 #### `src/components/CollabBar.tsx`
-**Barra de colaboración.** Gestiona la UI de conexión P2P:
-- Input de nombre de usuario
-- Estados: desconectado / conectado
-- Crear sala, unirse a sala, desconectarse
-- Copiar Room ID al portapapeles
-- Sección de salas guardadas con dropdown
-- Re-hosting de documentos guardados
-- Botón de eliminación de salas
+Barra de colaboración: crear/unirse a salas, copiar Room ID, salas guardadas, re-hosting.
 
 #### `src/components/RemoteCursors.tsx`
-**Overlay de cursores remotos.** Renderiza barras de color y etiquetas con el nombre de cada peer remoto en la posición correspondiente del texto. Usa un **elemento espejo** (mirror div) invisible para calcular las coordenadas X/Y de cada posición de texto, replicando exactamente los estilos del textarea.
+Overlay de cursores remotos con mirror div para calcular posiciones exactas.
 
 ### Hooks
 
 #### `src/hooks/useCollab.ts`
-**El corazón de la colaboración P2P.** Este custom hook gestiona:
-- Creación y destrucción de instancias PeerJS
-- Conexiones mesh entre todos los peers
-- Broadcast de cambios de texto con diff
-- Sincronización inicial al unirse a una sala
-- Gestión de cursores remotos
-- Persistencia en localStorage
-- Ajuste de posiciones de cursor basado en edits
+Hook principal de colaboración. Conecta vía WebSocket al sidecar local y gestiona salas, cambios remotos, cursores y persistencia.
 
 ### Estilos
 
 #### `src/styles/global.css`
-Define el sistema de diseño completo mediante **CSS custom properties** (variables CSS):
-- Paleta de colores cálida tipo "papel" (beige, marrón, terracota)
-- Dos tipografías: Crimson Pro (serif) para cuerpo, DM Sans (sans-serif) para UI
-- Variables de espaciado, radios de borde, sombras
-- Estilos de scrollbar personalizados
-- Selección de texto con color accent
+TailwindCSS v4 con `@theme` para design tokens, `@plugin "@tailwindcss/typography"` para estilos de markdown, y `@layer base` para estilos globales y prose.

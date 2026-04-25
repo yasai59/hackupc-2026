@@ -7,24 +7,32 @@
   },
   "scripts": {
     "dev": "astro dev",
+    "dev:sidecar": "node sidecar/index.mjs",
+    "dev:all": "concurrently \"npm run dev:sidecar\" \"npm run dev\"",
     "build": "astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.8",
     "@astrojs/react": "^5.0.4",
+    "@tailwindcss/typography": "^0.5.19",
+    "@tauri-apps/api": "^2.10.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "astro": "^6.1.9",
     "marked": "^18.0.2",
-    "peerjs": "^1.5.5",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "typescript": "^5.9.3"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.4",
+    "@tauri-apps/cli": "^2.10.1",
+    "concurrently": "^9.2.1",
     "tailwindcss": "^4.2.4"
   }
 }

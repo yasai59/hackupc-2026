@@ -1,9 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import Peer from 'peerjs';
-
-type DataConnection = ReturnType<InstanceType<typeof Peer>['connect']>;
 
 const CURSOR_COLORS = ['#c45d3e', '#2d8a4e', '#4a6fa5', '#9b59b6', '#e67e22', '#1abc9c', '#e74c3c', '#3498db'];
+const SIDECAR_URL = 'ws://localhost:9876';
 
 export interface RemoteCursor {
   peerId: string;
@@ -37,11 +35,6 @@ const DOC_PREFIX = 'inkwell-doc-';
 function getSavedRooms(): string[] {
   try { return JSON.parse(localStorage.getItem(ROOMS_KEY) || '[]'); }
   catch { return []; }
-}
-
-function getInitialRooms(): string[] {
-  if (typeof window === 'undefined') return [];
-  return getSavedRooms();
 }
 
 function saveRooms(rooms: string[]) { localStorage.setItem(ROOMS_KEY, JSON.stringify(rooms)); }
@@ -81,211 +74,242 @@ export function useCollab(
   });
   const [remoteCursors, setRemoteCursors] = useState<RemoteCursor[]>([]);
 
-  const peerRef = useRef<Peer | null>(null);
-  const connectionsRef = useRef<Map<string, DataConnection>>(new Map());
+  const wsRef = useRef<WebSocket | null>(null);
   const isRemoteRef = useRef(false);
   const contentRef = useRef(content);
   const prevContentRef = useRef(content);
   const roomIdRef = useRef<string | null>(null);
   const peerColorRef = useRef<string>(CURSOR_COLORS[Math.floor(Math.random() * CURSOR_COLORS.length)]);
-  const myIdRef = useRef<string>('');
+  const onRemoteChangeRef = useRef(onRemoteChange);
+  const usernameRef = useRef(username);
+
   contentRef.current = content;
+  onRemoteChangeRef.current = onRemoteChange;
+  usernameRef.current = username;
 
   useEffect(() => {
-    setState(prev => ({ ...prev, savedRooms: getInitialRooms() }));
+    setState(prev => ({ ...prev, savedRooms: getSavedRooms() }));
   }, []);
 
-  const shiftCursors = useCallback((start: number, deletedLen: number, insertedLen: number) => {
-    setRemoteCursors(prev => prev.map(c => ({
-      ...c, position: adjustPos(c.position, start, deletedLen, insertedLen),
-    })));
-  }, []);
-
-  const updatePeerCount = useCallback(() => {
-    setState(prev => ({ ...prev, peerCount: connectionsRef.current.size }));
-  }, []);
-
-  const broadcastToAll = useCallback((msg: object) => {
-    connectionsRef.current.forEach((conn) => {
-      if (conn.open) conn.send(msg);
-    });
-  }, []);
-
-  const sendPeerList = useCallback((conn: DataConnection) => {
-    const peers = Array.from(connectionsRef.current.keys());
-    conn.send({ type: 'peer-list', peers });
-  }, []);
-
-  const handleData = useCallback((connPeerId: string, data: unknown) => {
-    const msg = data as Record<string, unknown>;
-
-    if (msg.type === 'change') {
-      isRemoteRef.current = true;
-      if (typeof msg.editStart === 'number' && typeof msg.editDeletedLen === 'number' && typeof msg.editInsertedLen === 'number') {
-        shiftCursors(msg.editStart as number, msg.editDeletedLen as number, msg.editInsertedLen as number);
-      }
-      onRemoteChange(msg.text as string);
-      prevContentRef.current = msg.text as string;
-      contentRef.current = msg.text as string;
-      if (roomIdRef.current) saveDoc(roomIdRef.current, msg.text as string);
-      requestAnimationFrame(() => { isRemoteRef.current = false; });
+  useEffect(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'username', username }));
     }
+  }, [username]);
 
-    if (msg.type === 'sync-request') {
-      connPeerId;
-      const conn = connectionsRef.current.get(connPeerId);
-      if (conn && conn.open) {
-        conn.send({ type: 'sync-response', text: contentRef.current });
-      }
-    }
+  function processMessage(msg: Record<string, unknown>) {
+    switch (msg.type) {
+      case 'connected':
+        break;
 
-    if (msg.type === 'sync-response') {
-      isRemoteRef.current = true;
-      onRemoteChange(msg.text as string);
-      prevContentRef.current = msg.text as string;
-      contentRef.current = msg.text as string;
-      if (roomIdRef.current) saveDoc(roomIdRef.current, msg.text as string);
-      requestAnimationFrame(() => { isRemoteRef.current = false; });
-    }
-
-    if (msg.type === 'cursor' && msg.peerId && msg.color) {
-      const peerId = msg.peerId as string;
-      const color = msg.color as string;
-      const name = (msg.name as string) || peerId;
-      setRemoteCursors(prev => {
-        const filtered = prev.filter(c => c.peerId !== peerId);
-        return [...filtered, { peerId, position: (msg.position as number) ?? 0, color, name }];
-      });
-    }
-
-    if (msg.type === 'peer-list') {
-      const peers = msg.peers as string[];
-      const myId = myIdRef.current;
-      const alreadyConnected = Array.from(connectionsRef.current.keys());
-      const p = peerRef.current;
-      if (!p || p.destroyed) return;
-      for (const peerId of peers) {
-        if (peerId !== myId && !alreadyConnected.includes(peerId)) {
-          try {
-            const c = p.connect(peerId, { reliable: true });
-            setupConnection(c, true);
-          } catch { /* peer might not exist yet */ }
+      case 'room-created': {
+        const roomId = msg.roomId as string;
+        const docContent = (msg.content as string) || '';
+        roomIdRef.current = roomId;
+        contentRef.current = docContent;
+        prevContentRef.current = docContent;
+        if (docContent) {
+          isRemoteRef.current = true;
+          onRemoteChangeRef.current(docContent);
+          requestAnimationFrame(() => { isRemoteRef.current = false; });
         }
+        saveDoc(roomId, docContent);
+        setState({
+          isConnected: true,
+          roomId,
+          peerCount: 0,
+          error: null,
+          savedRooms: getSavedRooms(),
+        });
+        break;
       }
+
+      case 'room-joined': {
+        const roomId = msg.roomId as string;
+        roomIdRef.current = roomId;
+        if (!loadDoc(roomId)) {
+          saveDoc(roomId, contentRef.current);
+        }
+        setState(prev => ({
+          ...prev,
+          isConnected: true,
+          roomId,
+          peerCount: 0,
+          error: null,
+          savedRooms: getSavedRooms(),
+        }));
+        break;
+      }
+
+      case 'room-restored': {
+        const roomId = msg.roomId as string;
+        const docContent = (msg.content as string) || '';
+        roomIdRef.current = roomId;
+        contentRef.current = docContent;
+        prevContentRef.current = docContent;
+        if (docContent) {
+          isRemoteRef.current = true;
+          onRemoteChangeRef.current(docContent);
+          requestAnimationFrame(() => { isRemoteRef.current = false; });
+        }
+        saveDoc(roomId, docContent);
+        setState({
+          isConnected: true,
+          roomId,
+          peerCount: msg.peerCount as number || 0,
+          error: null,
+          savedRooms: getSavedRooms(),
+        });
+        break;
+      }
+
+      case 'peer-connected':
+        setState(prev => ({ ...prev, peerCount: msg.peerCount as number }));
+        break;
+
+      case 'peer-disconnected':
+        setState(prev => ({ ...prev, peerCount: msg.peerCount as number }));
+        setRemoteCursors(prev => prev.filter(c => c.peerId !== msg.peerId));
+        break;
+
+      case 'remote-change': {
+        isRemoteRef.current = true;
+        const text = msg.text as string;
+        if (typeof msg.editStart === 'number' && typeof msg.editDeletedLen === 'number' && typeof msg.editInsertedLen === 'number') {
+          setRemoteCursors(prev => prev.map(c => ({
+            ...c,
+            position: adjustPos(c.position, msg.editStart as number, msg.editDeletedLen as number, msg.editInsertedLen as number),
+          })));
+        }
+        onRemoteChangeRef.current(text);
+        prevContentRef.current = text;
+        contentRef.current = text;
+        if (roomIdRef.current) saveDoc(roomIdRef.current, text);
+        requestAnimationFrame(() => { isRemoteRef.current = false; });
+        break;
+      }
+
+      case 'remote-cursor': {
+        const peerId = (msg.peerId as string) || 'unknown';
+        const color = (msg.color as string) || CURSOR_COLORS[0];
+        const name = (msg.name as string) || peerId;
+        setRemoteCursors(prev => {
+          const filtered = prev.filter(c => c.peerId !== peerId);
+          return [...filtered, { peerId, position: (msg.position as number) ?? 0, color, name }];
+        });
+        break;
+      }
+
+      case 'left':
+        setState(prev => ({
+          ...prev,
+          isConnected: false,
+          roomId: null,
+          peerCount: 0,
+          savedRooms: getSavedRooms(),
+        }));
+        setRemoteCursors([]);
+        roomIdRef.current = null;
+        break;
     }
-  }, [onRemoteChange, shiftCursors]);
+  }
 
-  const setupConnection = useCallback((conn: DataConnection, skipSync?: boolean) => {
-    if (connectionsRef.current.has(conn.peer)) return;
-    connectionsRef.current.set(conn.peer, conn);
-    updatePeerCount();
+  useEffect(() => {
+    const ws = new WebSocket(SIDECAR_URL);
 
-    conn.on('data', (data) => handleData(conn.peer, data));
+    ws.onopen = () => {
+      console.log('Connected to Inkwell P2P sidecar');
+      ws.send(JSON.stringify({ type: 'username', username: usernameRef.current }));
+    };
 
-    conn.on('open', () => {
-      if (!skipSync) {
-        conn.send({ type: 'sync-request', text: '' });
-      }
-      sendPeerList(conn);
-      broadcastToAll({ type: 'peer-list', peers: Array.from(connectionsRef.current.keys()) });
-    });
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        processMessage(msg);
+      } catch { /* ignore */ }
+    };
 
-    conn.on('close', () => {
-      connectionsRef.current.delete(conn.peer);
-      setRemoteCursors(prev => prev.filter(c => c.peerId !== conn.peer));
-      updatePeerCount();
-    });
+    ws.onclose = () => {
+      console.log('Disconnected from sidecar, reconnecting in 2s...');
+      wsRef.current = null;
+      setTimeout(() => {
+        if (!wsRef.current) {
+          const newWs = new WebSocket(SIDECAR_URL);
+          reconnect(newWs);
+        }
+      }, 2000);
+    };
 
-    conn.on('error', () => {
-      connectionsRef.current.delete(conn.peer);
-      setRemoteCursors(prev => prev.filter(c => c.peerId !== conn.peer));
-      updatePeerCount();
-    });
-  }, [handleData, updatePeerCount, sendPeerList, broadcastToAll]);
+    ws.onerror = () => {
+      ws.close();
+    };
+
+    wsRef.current = ws;
+
+    return () => {
+      ws.onclose = null;
+      ws.close();
+      wsRef.current = null;
+    };
+  }, []);
+
+  function reconnect(ws: WebSocket) {
+    ws.onopen = () => {
+      console.log('Reconnected to Inkwell P2P sidecar');
+      ws.send(JSON.stringify({ type: 'username', username: usernameRef.current }));
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        processMessage(msg);
+      } catch { /* ignore */ }
+    };
+
+    ws.onclose = () => {
+      console.log('Disconnected from sidecar, reconnecting in 2s...');
+      wsRef.current = null;
+      setTimeout(() => {
+        if (!wsRef.current) {
+          const newWs = new WebSocket(SIDECAR_URL);
+          reconnect(newWs);
+        }
+      }, 2000);
+    };
+
+    ws.onerror = () => {
+      ws.close();
+    };
+
+    wsRef.current = ws;
+  }
+
+  const sendToSidecar = useCallback((msg: object) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(msg));
+    }
+  }, []);
 
   const createRoom = useCallback(() => {
-    if (peerRef.current) peerRef.current.destroy();
-    connectionsRef.current.clear();
     setRemoteCursors([]);
-
-    const id = 'inkwell-' + Math.random().toString(36).slice(2, 8);
-    const peer = new Peer(id);
-    myIdRef.current = id;
-
-    peer.on('open', () => {
-      roomIdRef.current = id;
-      saveDoc(id, contentRef.current);
-      setState({ isConnected: true, roomId: id, peerCount: 0, error: null, savedRooms: getSavedRooms() });
-    });
-
-    peer.on('connection', (conn) => { setupConnection(conn); });
-
-    peer.on('error', (err) => { setState(prev => ({ ...prev, error: err.type })); });
-
-    peerRef.current = peer;
-    prevContentRef.current = contentRef.current;
-  }, [setupConnection]);
+    sendToSidecar({ type: 'create', content: contentRef.current });
+  }, [sendToSidecar]);
 
   const createRoomFromDoc = useCallback((oldRoomId: string) => {
     const savedContent = loadDoc(oldRoomId) || '';
-    if (peerRef.current) peerRef.current.destroy();
-    connectionsRef.current.clear();
     setRemoteCursors([]);
-
-    const id = 'inkwell-' + Math.random().toString(36).slice(2, 8);
-    const peer = new Peer(id);
-    myIdRef.current = id;
-
-    peer.on('open', () => {
-      roomIdRef.current = id;
-      saveDoc(id, savedContent);
-      onRemoteChange(savedContent);
-      prevContentRef.current = savedContent;
-      contentRef.current = savedContent;
-      setState({ isConnected: true, roomId: id, peerCount: 0, error: null, savedRooms: getSavedRooms() });
-    });
-
-    peer.on('connection', (conn) => { setupConnection(conn); });
-
-    peer.on('error', (err) => { setState(prev => ({ ...prev, error: err.type })); });
-
-    peerRef.current = peer;
-  }, [setupConnection, onRemoteChange]);
+    sendToSidecar({ type: 'create', content: savedContent });
+  }, [sendToSidecar]);
 
   const joinRoom = useCallback((id: string) => {
-    if (peerRef.current) peerRef.current.destroy();
-    connectionsRef.current.clear();
     setRemoteCursors([]);
-
-    const peer = new Peer();
-
-    peer.on('open', () => {
-      myIdRef.current = peer.id;
-      const conn = peer.connect(id, { reliable: true });
-      conn.on('open', () => {
-        roomIdRef.current = id;
-        if (!loadDoc(id)) saveDoc(id, contentRef.current);
-        setState({ isConnected: true, roomId: id, peerCount: 1, error: null, savedRooms: getSavedRooms() });
-      });
-      setupConnection(conn);
-    });
-
-    peer.on('connection', (conn) => { setupConnection(conn, true); });
-
-    peer.on('error', (err) => { setState(prev => ({ ...prev, error: err.type })); });
-
-    peerRef.current = peer;
-    prevContentRef.current = contentRef.current;
-  }, [setupConnection]);
+    sendToSidecar({ type: 'join', roomId: id, content: contentRef.current });
+  }, [sendToSidecar]);
 
   const disconnect = useCallback(() => {
     if (roomIdRef.current) saveDoc(roomIdRef.current, contentRef.current);
-    if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
-    connectionsRef.current.clear();
-    setRemoteCursors([]);
-    roomIdRef.current = null;
-    setState({ isConnected: false, roomId: null, peerCount: 0, error: null, savedRooms: getSavedRooms() });
-  }, []);
+    sendToSidecar({ type: 'leave' });
+  }, [sendToSidecar]);
 
   const deleteRoom = useCallback((id: string) => {
     deleteDoc(id);
@@ -296,22 +320,28 @@ export function useCollab(
     if (isRemoteRef.current) return;
     const prev = prevContentRef.current;
     const { start, deletedLen, insertedLen } = computeEdit(prev, text);
-    shiftCursors(start, deletedLen, insertedLen);
+    setRemoteCursors(prev2 => prev2.map(c => ({
+      ...c,
+      position: adjustPos(c.position, start, deletedLen, insertedLen),
+    })));
     prevContentRef.current = text;
     if (roomIdRef.current) saveDoc(roomIdRef.current, text);
-    broadcastToAll({ type: 'change', text, editStart: start, editDeletedLen: deletedLen, editInsertedLen: insertedLen });
-  }, [shiftCursors, broadcastToAll]);
+    sendToSidecar({
+      type: 'change',
+      text,
+      editStart: start,
+      editDeletedLen: deletedLen,
+      editInsertedLen: insertedLen,
+    });
+  }, [sendToSidecar]);
 
   const broadcastCursor = useCallback((position: number) => {
-    broadcastToAll({ type: 'cursor', position, peerId: myIdRef.current, color: peerColorRef.current, name: username });
-  }, [username, broadcastToAll]);
-
-  useEffect(() => {
-    return () => {
-      if (roomIdRef.current) saveDoc(roomIdRef.current, contentRef.current);
-      if (peerRef.current) peerRef.current.destroy();
-    };
-  }, []);
+    sendToSidecar({
+      type: 'cursor',
+      position,
+      color: peerColorRef.current,
+    });
+  }, [sendToSidecar]);
 
   return [state, { createRoom, createRoomFromDoc, joinRoom, disconnect, broadcastChange, broadcastCursor, remoteCursors, deleteRoom }];
 }
